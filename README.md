@@ -1,11 +1,4 @@
-```
-╭─────────────────╮
-│ ░█▀█░█░█▄░█░█▄▀ │
-│ ░█▄█░█░█░▀█░█░█ │
-╰─────────────────╯
-```
-
-# Oink
+![Oink](logo.png)
 
 AI accounting powered by Claude Code. Import bank statements, auto-categorize transactions, generate reports—all through natural conversation.
 
