@@ -1,0 +1,106 @@
+#!/usr/bin/env python3
+"""Categorize a transaction. No external dependencies."""
+import argparse
+import json
+import sqlite3
+import sys
+from pathlib import Path
+
+SCRIPT_DIR = Path(__file__).parent
+BASE_DIR = SCRIPT_DIR.parent
+DB_PATH = BASE_DIR / "oink.db"
+
+
+def get_db():
+    """Get database connection with foreign keys enabled."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    return conn
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Categorize a transaction")
+    parser.add_argument("--id", required=True, type=int, help="Transaction ID")
+    parser.add_argument("--category", required=True, help="Category name")
+    parser.add_argument("--display-name", help="Display name (optional)")
+    parser.add_argument("--json", action="store_true", help="Output JSON")
+    args = parser.parse_args()
+
+    if not DB_PATH.exists():
+        if args.json:
+            print(json.dumps({"error": "Database not found. Run ./scripts/init first."}))
+        else:
+            print("Database not found. Run ./scripts/init first.")
+        sys.exit(1)
+
+    conn = get_db()
+
+    # Get the transaction and its entity
+    tx = conn.execute("""
+        SELECT t.id, t.description, t.amount, a.entity_id, e.name as entity_name
+        FROM transactions t
+        JOIN accounts a ON t.account_id = a.id
+        JOIN entities e ON a.entity_id = e.id
+        WHERE t.id = ?
+    """, (args.id,)).fetchone()
+
+    if not tx:
+        if args.json:
+            print(json.dumps({"error": f"Transaction {args.id} not found"}))
+        else:
+            print(f"Transaction {args.id} not found")
+        sys.exit(1)
+
+    # Find the category by name within this entity
+    cat = conn.execute("""
+        SELECT id, name, type FROM categories
+        WHERE name = ? AND entity_id = ?
+    """, (args.category, tx['entity_id'])).fetchone()
+
+    if not cat:
+        # List available categories for this entity
+        cats = conn.execute("""
+            SELECT name, type FROM categories
+            WHERE entity_id = ?
+            ORDER BY type, name
+        """, (tx['entity_id'],)).fetchall()
+
+        if args.json:
+            print(json.dumps({
+                "error": f"Category '{args.category}' not found for entity '{tx['entity_name']}'",
+                "available_categories": [{"name": c['name'], "type": c['type']} for c in cats]
+            }))
+        else:
+            print(f"Category '{args.category}' not found for entity '{tx['entity_name']}'")
+            print("Available categories:")
+            for c in cats:
+                print(f"  - {c['name']} ({c['type']})")
+        sys.exit(1)
+
+    # Use display_name if provided, otherwise use description
+    display_name = args.display_name if args.display_name else tx['description']
+
+    # Update the transaction
+    conn.execute("""
+        UPDATE transactions SET category_id = ?, display_name = ?
+        WHERE id = ?
+    """, (cat['id'], display_name, args.id))
+    conn.commit()
+    conn.close()
+
+    if args.json:
+        print(json.dumps({
+            "success": True,
+            "transaction_id": args.id,
+            "category": cat['name'],
+            "category_type": cat['type'],
+            "display_name": display_name
+        }))
+    else:
+        print(f"Transaction {args.id} categorized as '{cat['name']}' ({cat['type']})")
+        print(f"  Display name: {display_name}")
+
+
+if __name__ == "__main__":
+    main()

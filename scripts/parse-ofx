@@ -1,0 +1,115 @@
+#!/usr/bin/env python3
+"""Parse OFX file to JSON. No external dependencies."""
+import argparse
+import json
+import re
+import sys
+from pathlib import Path
+
+
+def parse_ofx(content):
+    """Parse OFX content and return structured data.
+
+    Note: This is duplicated in scripts/import for standalone use.
+    Keep both implementations in sync.
+    """
+    result = {
+        "currency": None,
+        "account_id": None,
+        "date_start": None,
+        "date_end": None,
+        "transactions": []
+    }
+
+    # Extract currency
+    currency_match = re.search(r'<CURDEF>(\w+)', content)
+    if currency_match:
+        result["currency"] = currency_match.group(1)
+
+    # Extract account ID
+    acctid_match = re.search(r'<ACCTID>(\d+)', content)
+    if acctid_match:
+        result["account_id"] = acctid_match.group(1)
+
+    # Extract date range
+    dtstart_match = re.search(r'<DTSTART>(\d{8})', content)
+    dtend_match = re.search(r'<DTEND>(\d{8})', content)
+    if dtstart_match:
+        d = dtstart_match.group(1)
+        result["date_start"] = f"{d[:4]}-{d[4:6]}-{d[6:8]}"
+    if dtend_match:
+        d = dtend_match.group(1)
+        result["date_end"] = f"{d[:4]}-{d[4:6]}-{d[6:8]}"
+
+    # Extract transactions
+    # Find all STMTTRN blocks
+    tx_pattern = r'<STMTTRN>(.*?)</STMTTRN>'
+    tx_blocks = re.findall(tx_pattern, content, re.DOTALL)
+
+    for block in tx_blocks:
+        tx = {}
+
+        # TRNTYPE (CREDIT, DEBIT, etc.)
+        trntype = re.search(r'<TRNTYPE>(\w+)', block)
+        tx["trntype"] = trntype.group(1) if trntype else None
+
+        # DTPOSTED - date posted (YYYYMMDD format, may have time/timezone suffix)
+        dtposted = re.search(r'<DTPOSTED>(\d{8})', block)
+        if dtposted:
+            d = dtposted.group(1)
+            tx["date"] = f"{d[:4]}-{d[4:6]}-{d[6:8]}"
+        else:
+            tx["date"] = None
+
+        # TRNAMT - amount (may be negative)
+        trnamt = re.search(r'<TRNAMT>(-?\d+\.?\d*)', block)
+        tx["amount"] = trnamt.group(1) if trnamt else None
+
+        # FITID - unique transaction ID
+        fitid = re.search(r'<FITID>(\S+)', block)
+        tx["fitid"] = fitid.group(1) if fitid else None
+
+        # NAME - description/memo (may contain spaces, ends at next tag or newline)
+        name = re.search(r'<NAME>([^<\n]+)', block)
+        tx["name"] = name.group(1).strip() if name else None
+
+        result["transactions"].append(tx)
+
+    return result
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Parse OFX file to JSON")
+    parser.add_argument("--file", required=True, help="OFX file to parse")
+    parser.add_argument("--summary", action="store_true", help="Show summary only (no transactions)")
+    args = parser.parse_args()
+
+    path = Path(args.file)
+    if not path.exists():
+        print(json.dumps({"error": f"File not found: {args.file}"}))
+        sys.exit(1)
+
+    if path.suffix.lower() != '.ofx':
+        print(json.dumps({"error": f"Expected .ofx file, got: {path.suffix}"}))
+        sys.exit(1)
+
+    content = path.read_text(encoding='utf-8', errors='replace')
+    result = parse_ofx(content)
+
+    if args.summary:
+        summary = {
+            "file": str(path),
+            "currency": result["currency"],
+            "account_id": result["account_id"],
+            "date_start": result["date_start"],
+            "date_end": result["date_end"],
+            "transaction_count": len(result["transactions"])
+        }
+        print(json.dumps(summary, indent=2))
+    else:
+        result["file"] = str(path)
+        print(json.dumps(result, indent=2))
+
+
+if __name__ == "__main__":
+    main()

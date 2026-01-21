@@ -1,0 +1,129 @@
+#!/usr/bin/env python3
+"""Export transactions to CSV. No external dependencies."""
+import argparse
+import csv
+import json
+import sqlite3
+import sys
+from pathlib import Path
+
+SCRIPT_DIR = Path(__file__).parent
+BASE_DIR = SCRIPT_DIR.parent
+DB_PATH = BASE_DIR / "oink.db"
+
+
+def get_db():
+    """Get database connection with foreign keys enabled."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    return conn
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Export transactions to CSV")
+    parser.add_argument("--entity", required=True, help="Entity name (required)")
+    parser.add_argument("--year", help="Filter by year")
+    parser.add_argument("--output", help="Output filename")
+    parser.add_argument("--json", action="store_true", help="Output JSON instead of CSV")
+    args = parser.parse_args()
+
+    if not DB_PATH.exists():
+        if args.json:
+            print(json.dumps({"error": "Database not found. Run ./scripts/init first."}))
+        else:
+            print("Database not found. Run ./scripts/init first.")
+        sys.exit(1)
+
+    conn = get_db()
+
+    # Build filters
+    conditions = ["e.name = ?"]
+    params = [args.entity]
+    if args.year:
+        conditions.append("t.date LIKE ?")
+        params.append(f"{args.year}%")
+
+    where_clause = "WHERE " + " AND ".join(conditions)
+
+    query = f"""
+        SELECT
+            e.name as entity,
+            t.date,
+            a.name as account,
+            a.currency,
+            t.display_name,
+            c.name as category,
+            c.type as category_type,
+            t.amount,
+            t.description as bank_description,
+            t.fitid,
+            t.reconciled,
+            t.notes
+        FROM transactions t
+        JOIN accounts a ON t.account_id = a.id
+        JOIN entities e ON a.entity_id = e.id
+        LEFT JOIN categories c ON t.category_id = c.id
+        {where_clause}
+        ORDER BY e.name, t.date, t.id
+    """
+
+    rows = conn.execute(query, params).fetchall()
+    conn.close()
+
+    if not rows:
+        if args.json:
+            print(json.dumps({"error": "No transactions to export"}))
+        else:
+            print("No transactions to export")
+        sys.exit(1)
+
+    if args.json:
+        result = []
+        for row in rows:
+            result.append({
+                "entity": row['entity'],
+                "date": row['date'],
+                "account": row['account'],
+                "currency": row['currency'],
+                "display_name": row['display_name'] or '',
+                "category": row['category'] or '',
+                "category_type": row['category_type'] or '',
+                "amount": row['amount'],
+                "bank_description": row['bank_description'],
+                "fitid": row['fitid'],
+                "reconciled": bool(row['reconciled']),
+                "notes": row['notes'] or ''
+            })
+        print(json.dumps({"count": len(result), "transactions": result}))
+    else:
+        # Output filename
+        year_str = args.year or 'all'
+        output_path = args.output if args.output else f"export-{args.entity.lower()}-{year_str}.csv"
+
+        with open(output_path, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['Entity', 'Date', 'Account', 'Currency', 'Display Name', 'Category',
+                            'Category Type', 'Amount', 'Bank Description', 'FITID', 'Reconciled', 'Notes'])
+
+            for row in rows:
+                writer.writerow([
+                    row['entity'],
+                    row['date'],
+                    row['account'],
+                    row['currency'],
+                    row['display_name'] or '',
+                    row['category'] or '',
+                    row['category_type'] or '',
+                    row['amount'],
+                    row['bank_description'],
+                    row['fitid'],
+                    'Yes' if row['reconciled'] else 'No',
+                    row['notes'] or ''
+                ])
+
+        print(f"Exported {len(rows)} transactions to {output_path}")
+
+
+if __name__ == "__main__":
+    main()

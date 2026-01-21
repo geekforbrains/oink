@@ -1,0 +1,343 @@
+#!/usr/bin/env python3
+"""Reconcile transactions. No external dependencies."""
+import argparse
+import json
+import sqlite3
+import sys
+from decimal import Decimal
+from pathlib import Path
+
+SCRIPT_DIR = Path(__file__).parent
+BASE_DIR = SCRIPT_DIR.parent
+DB_PATH = BASE_DIR / "oink.db"
+
+
+def get_db():
+    """Get database connection with foreign keys enabled."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    return conn
+
+
+def cmd_mark(args):
+    """Mark transaction(s) as reconciled."""
+    conn = get_db()
+
+    if not args.ids:
+        if args.json:
+            print(json.dumps({"error": "No transaction IDs provided"}))
+        else:
+            print("No transaction IDs provided")
+        sys.exit(1)
+
+    updated = 0
+    not_found = []
+    for tx_id in args.ids:
+        result = conn.execute("UPDATE transactions SET reconciled = 1 WHERE id = ?", (tx_id,))
+        if result.rowcount > 0:
+            updated += 1
+        else:
+            not_found.append(tx_id)
+
+    conn.commit()
+    conn.close()
+
+    if args.json:
+        print(json.dumps({
+            "success": True,
+            "updated": updated,
+            "not_found": not_found
+        }))
+    else:
+        if updated:
+            print(f"Marked {updated} transaction(s) as reconciled")
+        if not_found:
+            print(f"Transaction(s) not found: {', '.join(map(str, not_found))}")
+
+
+def cmd_unmark(args):
+    """Mark transaction(s) as unreconciled."""
+    conn = get_db()
+
+    if not args.ids:
+        if args.json:
+            print(json.dumps({"error": "No transaction IDs provided"}))
+        else:
+            print("No transaction IDs provided")
+        sys.exit(1)
+
+    updated = 0
+    not_found = []
+    for tx_id in args.ids:
+        result = conn.execute("UPDATE transactions SET reconciled = 0 WHERE id = ?", (tx_id,))
+        if result.rowcount > 0:
+            updated += 1
+        else:
+            not_found.append(tx_id)
+
+    conn.commit()
+    conn.close()
+
+    if args.json:
+        print(json.dumps({
+            "success": True,
+            "updated": updated,
+            "not_found": not_found
+        }))
+    else:
+        if updated:
+            print(f"Marked {updated} transaction(s) as unreconciled")
+        if not_found:
+            print(f"Transaction(s) not found: {', '.join(map(str, not_found))}")
+
+
+def cmd_status(args):
+    """Show reconciliation status summary."""
+    conn = get_db()
+
+    params = []
+    entity_filter = ""
+    if args.entity:
+        entity_filter = "AND e.name = ?"
+        params.append(args.entity)
+
+    account_filter = ""
+    if args.account:
+        account_filter = "AND a.name = ?"
+        params.append(args.account)
+
+    query = f"""
+        SELECT e.name as entity, a.name as account, a.currency,
+               SUM(CASE WHEN t.reconciled = 1 THEN 1 ELSE 0 END) as reconciled_count,
+               SUM(CASE WHEN t.reconciled = 0 THEN 1 ELSE 0 END) as unreconciled_count,
+               SUM(CASE WHEN t.reconciled = 1 THEN CAST(t.amount AS REAL) ELSE 0 END) as reconciled_amount,
+               SUM(CASE WHEN t.reconciled = 0 THEN CAST(t.amount AS REAL) ELSE 0 END) as unreconciled_amount,
+               SUM(CAST(t.amount AS REAL)) as total_amount
+        FROM transactions t
+        JOIN accounts a ON t.account_id = a.id
+        JOIN entities e ON a.entity_id = e.id
+        WHERE 1=1 {entity_filter} {account_filter}
+        GROUP BY a.id
+        ORDER BY e.name, a.name
+    """
+    rows = conn.execute(query, params).fetchall()
+    conn.close()
+
+    if args.json:
+        result = []
+        for r in rows:
+            result.append({
+                "entity": r['entity'],
+                "account": r['account'],
+                "currency": r['currency'],
+                "reconciled_count": r['reconciled_count'],
+                "unreconciled_count": r['unreconciled_count'],
+                "reconciled_amount": round(r['reconciled_amount'], 2),
+                "unreconciled_amount": round(r['unreconciled_amount'], 2),
+                "total_amount": round(r['total_amount'], 2)
+            })
+        print(json.dumps({"accounts": result}))
+    else:
+        if not rows:
+            print("No accounts found")
+            return
+
+        print(f"\n{'Entity':<10} {'Account':<18} {'Reconciled':>12} {'Unreconciled':>14} {'Total':>16}")
+        print("-" * 75)
+
+        for row in rows:
+            rec_str = f"{row['reconciled_count']}"
+            unrec_str = f"{row['unreconciled_count']}"
+            total_str = f"{row['currency']} {row['total_amount']:,.2f}"
+            print(f"{row['entity']:<10} {row['account']:<18} {rec_str:>12} {unrec_str:>14} {total_str:>16}")
+
+
+def cmd_list(args):
+    """List unreconciled transactions."""
+    conn = get_db()
+
+    params = []
+    conditions = ["t.reconciled = 0"]
+
+    if args.entity:
+        conditions.append("e.name = ?")
+        params.append(args.entity)
+
+    if args.account:
+        conditions.append("a.name = ?")
+        params.append(args.account)
+
+    where_clause = "WHERE " + " AND ".join(conditions)
+    limit_clause = f"LIMIT {args.limit}" if args.limit else ""
+
+    query = f"""
+        SELECT t.id, t.date, e.name as entity, a.name as account, a.currency,
+               t.description, t.display_name, t.amount, c.name as category
+        FROM transactions t
+        JOIN accounts a ON t.account_id = a.id
+        JOIN entities e ON a.entity_id = e.id
+        LEFT JOIN categories c ON t.category_id = c.id
+        {where_clause}
+        ORDER BY e.name, a.name, t.date DESC
+        {limit_clause}
+    """
+    rows = conn.execute(query, params).fetchall()
+
+    # Get total count
+    count_query = f"""
+        SELECT COUNT(*) as count
+        FROM transactions t
+        JOIN accounts a ON t.account_id = a.id
+        JOIN entities e ON a.entity_id = e.id
+        {where_clause}
+    """
+    total_count = conn.execute(count_query, params).fetchone()['count']
+
+    conn.close()
+
+    if args.json:
+        result = []
+        for r in rows:
+            result.append({
+                "id": r['id'],
+                "date": r['date'],
+                "entity": r['entity'],
+                "account": r['account'],
+                "currency": r['currency'],
+                "description": r['description'],
+                "display_name": r['display_name'],
+                "amount": r['amount'],
+                "category": r['category']
+            })
+        print(json.dumps({"count": total_count, "shown": len(result), "transactions": result}))
+    else:
+        if not rows:
+            print("All transactions are reconciled!")
+            return
+
+        shown_text = f" (showing {len(rows)})" if args.limit and len(rows) < total_count else ""
+        print(f"\n{total_count} unreconciled transaction(s){shown_text}:\n")
+        print(f"{'ID':<6} {'Date':<12} {'Entity':<10} {'Account':<15} {'Display Name':<20} {'Amount':>14}")
+        print("-" * 85)
+
+        for row in rows:
+            amount = Decimal(row['amount'])
+            amt_str = f"{row['currency']} {amount:,.2f}"
+            display = (row['display_name'] or row['description'])[:18]
+            if len(row['display_name'] or row['description']) > 20:
+                display += '..'
+            print(f"{row['id']:<6} {row['date']:<12} {row['entity']:<10} {row['account']:<15} {display:<20} {amt_str:>14}")
+
+
+def cmd_mark_all(args):
+    """Mark all transactions for an account as reconciled."""
+    conn = get_db()
+
+    # Find account
+    if args.entity:
+        entity = conn.execute("SELECT id FROM entities WHERE name = ?", (args.entity,)).fetchone()
+        if not entity:
+            if args.json:
+                print(json.dumps({"error": f"Entity '{args.entity}' not found"}))
+            else:
+                print(f"Entity '{args.entity}' not found")
+            sys.exit(1)
+
+        account = conn.execute(
+            "SELECT id, name FROM accounts WHERE name = ? AND entity_id = ?",
+            (args.account, entity['id'])
+        ).fetchone()
+    else:
+        account = conn.execute(
+            "SELECT id, name FROM accounts WHERE name = ?", (args.account,)
+        ).fetchone()
+
+    if not account:
+        if args.json:
+            print(json.dumps({"error": f"Account '{args.account}' not found"}))
+        else:
+            print(f"Account '{args.account}' not found")
+        sys.exit(1)
+
+    # Optional date filter
+    params = [account['id']]
+    date_filter = ""
+    if args.through:
+        date_filter = "AND date <= ?"
+        params.append(args.through)
+
+    result = conn.execute(
+        f"UPDATE transactions SET reconciled = 1 WHERE account_id = ? AND reconciled = 0 {date_filter}",
+        params
+    )
+    updated = result.rowcount
+    conn.commit()
+    conn.close()
+
+    if args.json:
+        print(json.dumps({"success": True, "updated": updated, "account": args.account}))
+    else:
+        through_text = f" through {args.through}" if args.through else ""
+        print(f"Marked {updated} transaction(s) as reconciled for {args.account}{through_text}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Reconcile transactions")
+    subparsers = parser.add_subparsers(dest="command", help="Command")
+
+    # mark
+    mark_parser = subparsers.add_parser("mark", help="Mark transaction(s) as reconciled")
+    mark_parser.add_argument("--id", type=int, action="append", dest="ids", help="Transaction ID (can be repeated)")
+    mark_parser.add_argument("--json", action="store_true", help="Output JSON")
+
+    # unmark
+    unmark_parser = subparsers.add_parser("unmark", help="Mark transaction(s) as unreconciled")
+    unmark_parser.add_argument("--id", type=int, action="append", dest="ids", help="Transaction ID (can be repeated)")
+    unmark_parser.add_argument("--json", action="store_true", help="Output JSON")
+
+    # status
+    status_parser = subparsers.add_parser("status", help="Show reconciliation status summary")
+    status_parser.add_argument("--entity", help="Filter by entity")
+    status_parser.add_argument("--account", help="Filter by account")
+    status_parser.add_argument("--json", action="store_true", help="Output JSON")
+
+    # list
+    list_parser = subparsers.add_parser("list", help="List unreconciled transactions")
+    list_parser.add_argument("--entity", help="Filter by entity")
+    list_parser.add_argument("--account", help="Filter by account")
+    list_parser.add_argument("--limit", type=int, help="Limit results")
+    list_parser.add_argument("--json", action="store_true", help="Output JSON")
+
+    # mark-all
+    mark_all_parser = subparsers.add_parser("mark-all", help="Mark all transactions for an account as reconciled")
+    mark_all_parser.add_argument("--entity", help="Entity name")
+    mark_all_parser.add_argument("--account", required=True, help="Account name")
+    mark_all_parser.add_argument("--through", help="Only mark transactions through this date (YYYY-MM-DD)")
+    mark_all_parser.add_argument("--json", action="store_true", help="Output JSON")
+
+    args = parser.parse_args()
+
+    if not DB_PATH.exists():
+        if getattr(args, 'json', False):
+            print(json.dumps({"error": "Database not found. Run ./scripts/init first."}))
+        else:
+            print("Database not found. Run ./scripts/init first.")
+        sys.exit(1)
+
+    if args.command == "mark":
+        cmd_mark(args)
+    elif args.command == "unmark":
+        cmd_unmark(args)
+    elif args.command == "status":
+        cmd_status(args)
+    elif args.command == "list":
+        cmd_list(args)
+    elif args.command == "mark-all":
+        cmd_mark_all(args)
+    else:
+        parser.print_help()
+
+
+if __name__ == "__main__":
+    main()

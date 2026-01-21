@@ -1,0 +1,417 @@
+#!/usr/bin/env python3
+"""Generate reports (pnl, monthly, by-category). No external dependencies."""
+import argparse
+import json
+import sqlite3
+import sys
+from decimal import Decimal
+from pathlib import Path
+
+SCRIPT_DIR = Path(__file__).parent
+BASE_DIR = SCRIPT_DIR.parent
+DB_PATH = BASE_DIR / "oink.db"
+
+
+def get_db():
+    """Get database connection with foreign keys enabled."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    return conn
+
+
+def report_pnl(conn, year, entity, as_json):
+    """Generate profit & loss report."""
+    conditions = []
+    params = []
+    if year:
+        conditions.append("t.date LIKE ?")
+        params.append(f"{year}%")
+    if entity:
+        conditions.append("e.name = ?")
+        params.append(entity)
+
+    where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
+
+    # Check for uncategorized
+    uncat_query = f"""
+        SELECT COUNT(*) as count
+        FROM transactions t
+        JOIN accounts a ON t.account_id = a.id
+        JOIN entities e ON a.entity_id = e.id
+        WHERE t.category_id IS NULL
+        {"AND " + " AND ".join(conditions) if conditions else ""}
+    """
+    uncat_count = conn.execute(uncat_query, params).fetchone()['count']
+    if uncat_count > 0:
+        if as_json:
+            return {"error": f"{uncat_count} uncategorized transaction(s)", "hint": "Run ./scripts/uncategorized to review"}
+        else:
+            print(f"\nError: {uncat_count} uncategorized transaction(s) found.")
+            print("P&L report requires all transactions to be categorized.")
+            print("\nRun './scripts/uncategorized' to review")
+            sys.exit(1)
+
+    query = f"""
+        SELECT e.name as entity, c.type, c.name, a.currency, SUM(CAST(t.amount AS REAL)) as total
+        FROM transactions t
+        JOIN accounts a ON t.account_id = a.id
+        JOIN entities e ON a.entity_id = e.id
+        LEFT JOIN categories c ON t.category_id = c.id
+        {where_clause}
+        GROUP BY e.name, a.currency, c.type, c.name
+        ORDER BY e.name, a.currency, c.type DESC, total DESC
+    """
+    rows = conn.execute(query, params).fetchall()
+
+    if as_json:
+        # Structure as nested object
+        result = {}
+        for row in rows:
+            ent = row['entity']
+            curr = row['currency']
+            cat_type = row['type'] or 'uncategorized'
+            cat_name = row['name'] or 'Uncategorized'
+
+            if ent not in result:
+                result[ent] = {}
+            if curr not in result[ent]:
+                result[ent][curr] = {"income": {}, "expense": {}, "transfer": {}, "totals": {"income": 0, "expense": 0, "net": 0}}
+
+            total = round(row['total'], 2)
+            result[ent][curr][cat_type][cat_name] = total
+            if cat_type == 'income':
+                result[ent][curr]["totals"]["income"] += total
+            elif cat_type == 'expense':
+                result[ent][curr]["totals"]["expense"] += total
+
+        # Calculate net for each
+        for ent in result:
+            for curr in result[ent]:
+                totals = result[ent][curr]["totals"]
+                totals["income"] = round(totals["income"], 2)
+                totals["expense"] = round(totals["expense"], 2)
+                totals["net"] = round(totals["income"] + totals["expense"], 2)
+
+        return {"report": "pnl", "year": year, "entity": entity, "data": result}
+    else:
+        entity_label = f" - {entity}" if entity else ""
+        year_label = f" ({year})" if year else ""
+        print(f"\n=== Profit & Loss{entity_label}{year_label} ===\n")
+
+        current_entity = None
+        current_currency = None
+        income_total = Decimal('0')
+        expense_total = Decimal('0')
+
+        for row in rows:
+            if row['entity'] != current_entity:
+                if current_currency:
+                    print(f"  {'─' * 40}")
+                    print(f"  Net: {current_currency} {income_total + expense_total:,.2f}\n")
+                current_entity = row['entity']
+                current_currency = None
+                income_total = Decimal('0')
+                expense_total = Decimal('0')
+                print(f"═══ {current_entity} ═══")
+
+            if row['currency'] != current_currency:
+                if current_currency:
+                    print(f"  {'─' * 40}")
+                    print(f"  Net: {current_currency} {income_total + expense_total:,.2f}\n")
+                    income_total = Decimal('0')
+                    expense_total = Decimal('0')
+                current_currency = row['currency']
+                print(f"── {current_currency} ──")
+
+            cat_name = row['name'] or 'Uncategorized'
+            cat_type = row['type'] or '?'
+            total = Decimal(str(row['total']))
+            print(f"  {cat_name:<30} {total:>12,.2f}  ({cat_type})")
+
+            if row['type'] == 'income':
+                income_total += total
+            elif row['type'] == 'expense':
+                expense_total += total
+
+        if current_currency:
+            print(f"  {'─' * 40}")
+            print(f"  Net: {current_currency} {income_total + expense_total:,.2f}")
+
+        return None
+
+
+def report_monthly(conn, year, entity, as_json):
+    """Generate monthly summary report."""
+    conditions = []
+    params = []
+    if year:
+        conditions.append("t.date LIKE ?")
+        params.append(f"{year}%")
+    if entity:
+        conditions.append("e.name = ?")
+        params.append(entity)
+
+    where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
+
+    # Check for uncategorized
+    uncat_query = f"""
+        SELECT COUNT(*) as count
+        FROM transactions t
+        JOIN accounts a ON t.account_id = a.id
+        JOIN entities e ON a.entity_id = e.id
+        WHERE t.category_id IS NULL
+        {"AND " + " AND ".join(conditions) if conditions else ""}
+    """
+    uncat_count = conn.execute(uncat_query, params).fetchone()['count']
+    if uncat_count > 0:
+        if as_json:
+            return {"error": f"{uncat_count} uncategorized transaction(s)", "hint": "Run ./scripts/uncategorized to review"}
+        else:
+            print(f"\nError: {uncat_count} uncategorized transaction(s) found.")
+            print("Monthly report requires all transactions to be categorized.")
+            print("\nRun './scripts/uncategorized' to review")
+            sys.exit(1)
+
+    query = f"""
+        SELECT
+            e.name as entity,
+            strftime('%Y-%m', t.date) as month,
+            a.currency,
+            SUM(CASE WHEN c.type = 'income' THEN CAST(t.amount AS REAL) ELSE 0 END) as income,
+            SUM(CASE WHEN c.type = 'expense' THEN CAST(t.amount AS REAL) ELSE 0 END) as expenses,
+            SUM(CASE WHEN c.type IN ('income', 'expense') THEN CAST(t.amount AS REAL) ELSE 0 END) as net
+        FROM transactions t
+        JOIN accounts a ON t.account_id = a.id
+        JOIN entities e ON a.entity_id = e.id
+        JOIN categories c ON t.category_id = c.id
+        {where_clause}
+        GROUP BY e.name, month, a.currency
+        ORDER BY e.name, month, a.currency
+    """
+    rows = conn.execute(query, params).fetchall()
+
+    if as_json:
+        result = []
+        for r in rows:
+            result.append({
+                "entity": r['entity'],
+                "month": r['month'],
+                "currency": r['currency'],
+                "income": round(r['income'], 2),
+                "expenses": round(r['expenses'], 2),
+                "net": round(r['net'], 2)
+            })
+        return {"report": "monthly", "year": year, "entity": entity, "data": result}
+    else:
+        entity_label = f" - {entity}" if entity else ""
+        year_label = f" ({year})" if year else ""
+        print(f"\n=== Monthly Summary{entity_label}{year_label} ===\n")
+        print(f"{'Entity':<10} {'Month':<10} {'Currency':<6} {'Income':>12} {'Expenses':>12} {'Net':>12}")
+        print("-" * 68)
+        for row in rows:
+            print(f"{row['entity']:<10} {row['month']:<10} {row['currency']:<6} {row['income']:>12,.2f} {row['expenses']:>12,.2f} {row['net']:>12,.2f}")
+        return None
+
+
+def report_balance(conn, year, entity, as_json):
+    """Generate balance sheet report (assets vs liabilities)."""
+    conditions = []
+    params = []
+    if year:
+        conditions.append("t.date <= ?")
+        params.append(f"{year}-12-31")
+    if entity:
+        conditions.append("e.name = ?")
+        params.append(entity)
+
+    where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
+
+    query = f"""
+        SELECT e.name as entity, a.name as account, a.currency, a.account_type,
+               SUM(CAST(t.amount AS REAL)) as balance
+        FROM transactions t
+        JOIN accounts a ON t.account_id = a.id
+        JOIN entities e ON a.entity_id = e.id
+        {where_clause}
+        GROUP BY a.id
+        ORDER BY e.name, a.account_type, a.currency, a.name
+    """
+    rows = conn.execute(query, params).fetchall()
+
+    if as_json:
+        result = {}
+        for r in rows:
+            ent = r['entity']
+            if ent not in result:
+                result[ent] = {"assets": [], "liabilities": [], "totals": {}}
+
+            account_data = {
+                "account": r['account'],
+                "currency": r['currency'],
+                "balance": round(r['balance'], 2)
+            }
+
+            if r['account_type'] == 'asset':
+                result[ent]["assets"].append(account_data)
+            else:
+                result[ent]["liabilities"].append(account_data)
+
+        # Calculate totals per currency
+        for ent in result:
+            totals = {}
+            for acc in result[ent]["assets"]:
+                curr = acc['currency']
+                if curr not in totals:
+                    totals[curr] = {"assets": 0, "liabilities": 0, "net": 0}
+                totals[curr]["assets"] += acc['balance']
+
+            for acc in result[ent]["liabilities"]:
+                curr = acc['currency']
+                if curr not in totals:
+                    totals[curr] = {"assets": 0, "liabilities": 0, "net": 0}
+                totals[curr]["liabilities"] += acc['balance']
+
+            for curr in totals:
+                totals[curr]["assets"] = round(totals[curr]["assets"], 2)
+                totals[curr]["liabilities"] = round(totals[curr]["liabilities"], 2)
+                totals[curr]["net"] = round(totals[curr]["assets"] + totals[curr]["liabilities"], 2)
+
+            result[ent]["totals"] = totals
+
+        return {"report": "balance", "year": year, "entity": entity, "data": result}
+    else:
+        entity_label = f" - {entity}" if entity else ""
+        year_label = f" (as of {year}-12-31)" if year else ""
+        print(f"\n=== Balance Sheet{entity_label}{year_label} ===\n")
+
+        current_entity = None
+        assets_by_currency = {}
+        liabilities_by_currency = {}
+
+        for row in rows:
+            if row['entity'] != current_entity:
+                if current_entity:
+                    # Print totals for previous entity
+                    print(f"\n  {'─' * 45}")
+                    all_currencies = set(assets_by_currency.keys()) | set(liabilities_by_currency.keys())
+                    for curr in sorted(all_currencies):
+                        asset_total = assets_by_currency.get(curr, Decimal('0'))
+                        liab_total = liabilities_by_currency.get(curr, Decimal('0'))
+                        net = asset_total + liab_total
+                        print(f"  {curr} Net Worth: {net:>12,.2f}  (Assets: {asset_total:,.2f}, Liabilities: {liab_total:,.2f})")
+                    print()
+
+                current_entity = row['entity']
+                assets_by_currency = {}
+                liabilities_by_currency = {}
+                print(f"═══ {current_entity} ═══")
+                print(f"\n  {'Account':<25} {'Type':<12} {'Currency':<6} {'Balance':>14}")
+                print(f"  {'-' * 60}")
+
+            balance = Decimal(str(row['balance']))
+            print(f"  {row['account']:<25} {row['account_type']:<12} {row['currency']:<6} {balance:>14,.2f}")
+
+            if row['account_type'] == 'asset':
+                assets_by_currency[row['currency']] = assets_by_currency.get(row['currency'], Decimal('0')) + balance
+            else:
+                liabilities_by_currency[row['currency']] = liabilities_by_currency.get(row['currency'], Decimal('0')) + balance
+
+        # Print totals for last entity
+        if current_entity:
+            print(f"\n  {'─' * 45}")
+            all_currencies = set(assets_by_currency.keys()) | set(liabilities_by_currency.keys())
+            for curr in sorted(all_currencies):
+                asset_total = assets_by_currency.get(curr, Decimal('0'))
+                liab_total = liabilities_by_currency.get(curr, Decimal('0'))
+                net = asset_total + liab_total
+                print(f"  {curr} Net Worth: {net:>12,.2f}  (Assets: {asset_total:,.2f}, Liabilities: {liab_total:,.2f})")
+
+        return None
+
+
+def report_by_category(conn, year, entity, as_json):
+    """Generate by-category report."""
+    conditions = []
+    params = []
+    if year:
+        conditions.append("t.date LIKE ?")
+        params.append(f"{year}%")
+    if entity:
+        conditions.append("e.name = ?")
+        params.append(entity)
+
+    where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
+
+    query = f"""
+        SELECT e.name as entity, c.name, c.type, a.currency, SUM(CAST(t.amount AS REAL)) as total, COUNT(*) as count
+        FROM transactions t
+        JOIN accounts a ON t.account_id = a.id
+        JOIN entities e ON a.entity_id = e.id
+        LEFT JOIN categories c ON t.category_id = c.id
+        {where_clause}
+        GROUP BY e.name, c.id, a.currency
+        ORDER BY e.name, c.type, c.name, a.currency
+    """
+    rows = conn.execute(query, params).fetchall()
+
+    if as_json:
+        result = []
+        for r in rows:
+            result.append({
+                "entity": r['entity'],
+                "category": r['name'] or 'Uncategorized',
+                "type": r['type'] or '?',
+                "currency": r['currency'],
+                "total": round(r['total'], 2),
+                "count": r['count']
+            })
+        return {"report": "by-category", "year": year, "entity": entity, "data": result}
+    else:
+        entity_label = f" - {entity}" if entity else ""
+        year_label = f" ({year})" if year else ""
+        print(f"\n=== By Category{entity_label}{year_label} ===\n")
+        print(f"{'Entity':<10} {'Category':<20} {'Type':<10} {'Currency':<6} {'Total':>12} {'Count':>6}")
+        print("-" * 70)
+        for row in rows:
+            cat_name = row['name'] or 'Uncategorized'
+            cat_type = row['type'] or '?'
+            print(f"{row['entity']:<10} {cat_name:<20} {cat_type:<10} {row['currency']:<6} {row['total']:>12,.2f} {row['count']:>6}")
+        return None
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Generate Oink reports")
+    parser.add_argument("--report-type", required=True, choices=["pnl", "monthly", "by-category", "balance"], help="Report type")
+    parser.add_argument("--year", help="Filter by year")
+    parser.add_argument("--entity", help="Filter by entity")
+    parser.add_argument("--json", action="store_true", help="Output JSON")
+    args = parser.parse_args()
+
+    if not DB_PATH.exists():
+        if args.json:
+            print(json.dumps({"error": "Database not found. Run ./scripts/init first."}))
+        else:
+            print("Database not found. Run ./scripts/init first.")
+        sys.exit(1)
+
+    conn = get_db()
+
+    result = None
+    if args.report_type == "pnl":
+        result = report_pnl(conn, args.year, args.entity, args.json)
+    elif args.report_type == "monthly":
+        result = report_monthly(conn, args.year, args.entity, args.json)
+    elif args.report_type == "by-category":
+        result = report_by_category(conn, args.year, args.entity, args.json)
+    elif args.report_type == "balance":
+        result = report_balance(conn, args.year, args.entity, args.json)
+
+    conn.close()
+
+    if args.json and result is not None:
+        print(json.dumps(result))
+
+
+if __name__ == "__main__":
+    main()

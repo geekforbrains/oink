@@ -1,0 +1,103 @@
+#!/usr/bin/env python3
+"""Show uncategorized transactions. No external dependencies."""
+import argparse
+import json
+import sqlite3
+import sys
+from decimal import Decimal
+from pathlib import Path
+
+SCRIPT_DIR = Path(__file__).parent
+BASE_DIR = SCRIPT_DIR.parent
+DB_PATH = BASE_DIR / "oink.db"
+
+
+def get_db():
+    """Get database connection with foreign keys enabled."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    return conn
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Show uncategorized transactions")
+    parser.add_argument("--entity", help="Filter by entity")
+    parser.add_argument("--limit", type=int, help="Limit results")
+    parser.add_argument("--json", action="store_true", help="Output JSON")
+    args = parser.parse_args()
+
+    if not DB_PATH.exists():
+        if args.json:
+            print(json.dumps({"error": "Database not found. Run ./scripts/init first."}))
+        else:
+            print("Database not found. Run ./scripts/init first.")
+        sys.exit(1)
+
+    conn = get_db()
+
+    params = []
+    entity_filter = ""
+    if args.entity:
+        entity_filter = "AND e.name = ?"
+        params.append(args.entity)
+
+    limit_clause = ""
+    if args.limit:
+        limit_clause = f"LIMIT {args.limit}"
+
+    query = f"""
+        SELECT t.id, t.date, e.name as entity, a.name as account, a.currency, t.description, t.amount
+        FROM transactions t
+        JOIN accounts a ON t.account_id = a.id
+        JOIN entities e ON a.entity_id = e.id
+        WHERE t.category_id IS NULL {entity_filter}
+        ORDER BY e.name, t.date DESC, t.id DESC
+        {limit_clause}
+    """
+    rows = conn.execute(query, params).fetchall()
+
+    # Get total count (without limit)
+    count_query = f"""
+        SELECT COUNT(*) as count
+        FROM transactions t
+        JOIN accounts a ON t.account_id = a.id
+        JOIN entities e ON a.entity_id = e.id
+        WHERE t.category_id IS NULL {entity_filter}
+    """
+    total_count = conn.execute(count_query, params[:1] if args.entity else []).fetchone()['count']
+
+    conn.close()
+
+    if args.json:
+        result = []
+        for r in rows:
+            result.append({
+                "id": r['id'],
+                "date": r['date'],
+                "entity": r['entity'],
+                "account": r['account'],
+                "currency": r['currency'],
+                "description": r['description'],
+                "amount": r['amount']
+            })
+        print(json.dumps({"count": total_count, "shown": len(result), "transactions": result}))
+    else:
+        if not rows:
+            print("No uncategorized transactions")
+            return
+
+        shown_text = f" (showing {len(rows)})" if args.limit and len(rows) < total_count else ""
+        print(f"\n{total_count} uncategorized transaction(s){shown_text}:\n")
+        print(f"{'ID':<6} {'Date':<12} {'Entity':<10} {'Account':<15} {'Description':<25} {'Amount':>12}")
+        print("-" * 86)
+
+        for row in rows:
+            amount = Decimal(row['amount'])
+            amt_str = f"{row['currency']} {amount:,.2f}"
+            desc = row['description'][:23] + '..' if len(row['description']) > 25 else row['description']
+            print(f"{row['id']:<6} {row['date']:<12} {row['entity']:<10} {row['account']:<15} {desc:<25} {amt_str:>12}")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,19 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+env/
+
+# Database (created by /setup)
+oink.db
+
+# Bank statements (personal data)
+data/*.ofx
+
+# Exports (regenerable)
+export-*.csv
+
+# Claude local settings
+.claude/settings.local.json

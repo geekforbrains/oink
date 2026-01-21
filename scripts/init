@@ -1,0 +1,72 @@
+#!/usr/bin/env python3
+"""Initialize database with schema. No external dependencies."""
+import argparse
+import json
+import sqlite3
+import sys
+from pathlib import Path
+
+SCRIPT_DIR = Path(__file__).parent
+BASE_DIR = SCRIPT_DIR.parent
+DB_PATH = BASE_DIR / "oink.db"
+SCHEMA_PATH = BASE_DIR / "schema.sql"
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Initialize Oink database")
+    parser.add_argument("--force", action="store_true", help="Overwrite existing database")
+    parser.add_argument("--json", action="store_true", help="Output JSON")
+    args = parser.parse_args()
+
+    if DB_PATH.exists() and not args.force:
+        if args.json:
+            print(json.dumps({"error": "Database already exists", "path": str(DB_PATH), "hint": "Use --force to reinitialize"}))
+        else:
+            print(f"Database already exists at {DB_PATH}")
+            print("Use --force to reinitialize (WARNING: destroys existing data)")
+        sys.exit(1)
+
+    if args.force and DB_PATH.exists():
+        DB_PATH.unlink()
+        if not args.json:
+            print("Removed existing database")
+
+    if not SCHEMA_PATH.exists():
+        if args.json:
+            print(json.dumps({"error": "Schema file not found", "path": str(SCHEMA_PATH)}))
+        else:
+            print(f"Schema file not found: {SCHEMA_PATH}")
+        sys.exit(1)
+
+    # Create database with schema only
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("PRAGMA foreign_keys = ON")
+
+    # Run schema
+    with open(SCHEMA_PATH) as f:
+        conn.executescript(f.read())
+
+    conn.commit()
+    conn.close()
+
+    if args.json:
+        print(json.dumps({
+            "success": True,
+            "path": str(DB_PATH),
+            "message": "Empty database created. Run /setup to import your first statement."
+        }))
+    else:
+        print(f"Database initialized at {DB_PATH}")
+        print()
+        print("Database is empty. Next steps:")
+        print("  1. Place OFX files in data/")
+        print("  2. Run /setup to import your first statement")
+        print()
+        print("Or manually:")
+        print("  ./scripts/entity add --name 'Personal'")
+        print("  ./scripts/account add --entity Personal --name 'Chequing' --currency CAD")
+        print("  ./scripts/import --file data/FILE.ofx --account 'Chequing'")
+
+
+if __name__ == "__main__":
+    main()

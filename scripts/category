@@ -1,0 +1,297 @@
+#!/usr/bin/env python3
+"""Manage categories. No external dependencies."""
+import argparse
+import json
+import sqlite3
+import sys
+from pathlib import Path
+
+SCRIPT_DIR = Path(__file__).parent
+BASE_DIR = SCRIPT_DIR.parent
+DB_PATH = BASE_DIR / "oink.db"
+
+
+def get_db():
+    """Get database connection with foreign keys enabled."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    return conn
+
+
+def cmd_add(args):
+    """Add a new category."""
+    conn = get_db()
+
+    # Find entity
+    entity = conn.execute("SELECT id, name FROM entities WHERE name = ?", (args.entity,)).fetchone()
+    if not entity:
+        entities = conn.execute("SELECT name FROM entities ORDER BY name").fetchall()
+        if args.json:
+            print(json.dumps({
+                "error": f"Entity '{args.entity}' not found",
+                "available_entities": [e['name'] for e in entities],
+                "hint": f"Create it first with: ./scripts/entity add --name '{args.entity}'"
+            }))
+        else:
+            print(f"Entity '{args.entity}' not found")
+            if entities:
+                print("Available entities:")
+                for e in entities:
+                    print(f"  - {e['name']}")
+            print(f"\nCreate it first with: ./scripts/entity add --name '{args.entity}'")
+        sys.exit(1)
+
+    # Check for duplicate category name for this entity
+    existing = conn.execute(
+        "SELECT id FROM categories WHERE entity_id = ? AND name = ?",
+        (entity['id'], args.name)
+    ).fetchone()
+    if existing:
+        if args.json:
+            print(json.dumps({"error": f"Category '{args.name}' already exists for entity '{entity['name']}'"}))
+        else:
+            print(f"Category '{args.name}' already exists for entity '{entity['name']}'")
+        sys.exit(1)
+
+    # Validate type
+    cat_type = args.category_type.lower()
+    if cat_type not in ('income', 'expense', 'transfer'):
+        if args.json:
+            print(json.dumps({"error": f"Invalid type '{cat_type}'. Must be income, expense, or transfer"}))
+        else:
+            print(f"Invalid type '{cat_type}'. Must be income, expense, or transfer")
+        sys.exit(1)
+
+    cursor = conn.execute(
+        "INSERT INTO categories (entity_id, name, type, description) VALUES (?, ?, ?, ?)",
+        (entity['id'], args.name, cat_type, args.description)
+    )
+    category_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+
+    if args.json:
+        print(json.dumps({
+            "success": True,
+            "id": category_id,
+            "entity": entity['name'],
+            "name": args.name,
+            "type": cat_type
+        }))
+    else:
+        print(f"Created category: {args.name} ({cat_type}) for {entity['name']}")
+
+
+def cmd_update(args):
+    """Update a category."""
+    conn = get_db()
+
+    # Find entity
+    entity = conn.execute("SELECT id, name FROM entities WHERE name = ?", (args.entity,)).fetchone()
+    if not entity:
+        if args.json:
+            print(json.dumps({"error": f"Entity '{args.entity}' not found"}))
+        else:
+            print(f"Entity '{args.entity}' not found")
+        sys.exit(1)
+
+    category = conn.execute(
+        "SELECT id, name, type FROM categories WHERE entity_id = ? AND name = ?",
+        (entity['id'], args.name)
+    ).fetchone()
+    if not category:
+        if args.json:
+            print(json.dumps({"error": f"Category '{args.name}' not found for entity '{entity['name']}'"}))
+        else:
+            print(f"Category '{args.name}' not found for entity '{entity['name']}'")
+        sys.exit(1)
+
+    if args.description is not None:
+        conn.execute("UPDATE categories SET description = ? WHERE id = ?", (args.description, category['id']))
+        conn.commit()
+
+    if args.json:
+        print(json.dumps({"success": True, "entity": entity['name'], "name": args.name}))
+    else:
+        print(f"Updated category: {args.name}")
+
+    conn.close()
+
+
+def cmd_delete(args):
+    """Delete a category."""
+    conn = get_db()
+
+    # Find entity
+    entity = conn.execute("SELECT id, name FROM entities WHERE name = ?", (args.entity,)).fetchone()
+    if not entity:
+        if args.json:
+            print(json.dumps({"error": f"Entity '{args.entity}' not found"}))
+        else:
+            print(f"Entity '{args.entity}' not found")
+        sys.exit(1)
+
+    category = conn.execute(
+        "SELECT id, name FROM categories WHERE entity_id = ? AND name = ?",
+        (entity['id'], args.name)
+    ).fetchone()
+    if not category:
+        if args.json:
+            print(json.dumps({"error": f"Category '{args.name}' not found for entity '{entity['name']}'"}))
+        else:
+            print(f"Category '{args.name}' not found for entity '{entity['name']}'")
+        sys.exit(1)
+
+    # Check for transactions using this category
+    tx_count = conn.execute(
+        "SELECT COUNT(*) FROM transactions WHERE category_id = ?", (category['id'],)
+    ).fetchone()[0]
+
+    if tx_count > 0:
+        if args.reassign:
+            # Find the reassignment category
+            new_cat = conn.execute(
+                "SELECT id, name FROM categories WHERE entity_id = ? AND name = ?",
+                (entity['id'], args.reassign)
+            ).fetchone()
+            if not new_cat:
+                if args.json:
+                    print(json.dumps({"error": f"Reassignment category '{args.reassign}' not found"}))
+                else:
+                    print(f"Reassignment category '{args.reassign}' not found")
+                sys.exit(1)
+
+            # Reassign transactions
+            conn.execute(
+                "UPDATE transactions SET category_id = ? WHERE category_id = ?",
+                (new_cat['id'], category['id'])
+            )
+            if not args.json:
+                print(f"Reassigned {tx_count} transaction(s) to '{args.reassign}'")
+        else:
+            if args.json:
+                print(json.dumps({
+                    "error": f"Cannot delete category '{args.name}': has {tx_count} transaction(s)",
+                    "hint": "Use --reassign <category> to move transactions to another category"
+                }))
+            else:
+                print(f"Cannot delete category '{args.name}': has {tx_count} transaction(s)")
+                print("Use --reassign <category> to move transactions to another category")
+            sys.exit(1)
+
+    # Check for patterns using this category
+    pattern_count = conn.execute(
+        "SELECT COUNT(*) FROM transaction_patterns WHERE category_id = ?", (category['id'],)
+    ).fetchone()[0]
+
+    if pattern_count > 0:
+        # Set pattern category_id to NULL
+        conn.execute(
+            "UPDATE transaction_patterns SET category_id = NULL WHERE category_id = ?",
+            (category['id'],)
+        )
+        if not args.json:
+            print(f"Removed category from {pattern_count} pattern(s)")
+
+    conn.execute("DELETE FROM categories WHERE id = ?", (category['id'],))
+    conn.commit()
+    conn.close()
+
+    if args.json:
+        print(json.dumps({"success": True, "entity": entity['name'], "name": args.name}))
+    else:
+        print(f"Deleted category: {args.name}")
+
+
+def cmd_list(args):
+    """List all categories."""
+    conn = get_db()
+
+    params = []
+    entity_filter = ""
+    if args.entity:
+        entity_filter = "WHERE e.name = ? OR c.entity_id IS NULL"
+        params.append(args.entity)
+
+    rows = conn.execute(f"""
+        SELECT c.id, COALESCE(e.name, 'Shared') as entity, c.name, c.type, c.description,
+               COUNT(t.id) as tx_count
+        FROM categories c
+        LEFT JOIN entities e ON c.entity_id = e.id
+        LEFT JOIN transactions t ON c.id = t.category_id
+        {entity_filter}
+        GROUP BY c.id
+        ORDER BY e.name, c.type, c.name
+    """, params).fetchall()
+
+    conn.close()
+
+    if args.json:
+        print(json.dumps({"categories": [dict(r) for r in rows]}))
+    else:
+        if not rows:
+            print("No categories found.")
+            print("Create one with: ./scripts/category add --entity <entity> --name <name> --category-type expense")
+            return
+
+        print(f"\n{'ID':<4} {'Entity':<10} {'Name':<22} {'Type':<10} {'Transactions':>12}")
+        print("-" * 65)
+        for row in rows:
+            print(f"{row['id']:<4} {row['entity']:<10} {row['name']:<22} {row['type']:<10} {row['tx_count']:>12}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Manage Oink categories")
+    subparsers = parser.add_subparsers(dest="command", help="Command")
+
+    # add
+    add_parser = subparsers.add_parser("add", help="Add a new category")
+    add_parser.add_argument("--entity", required=True, help="Entity name")
+    add_parser.add_argument("--name", required=True, help="Category name")
+    add_parser.add_argument("--category-type", required=True, help="Category type (income, expense, or transfer)")
+    add_parser.add_argument("--description", help="Description")
+    add_parser.add_argument("--json", action="store_true", help="Output JSON")
+
+    # update
+    update_parser = subparsers.add_parser("update", help="Update a category")
+    update_parser.add_argument("--entity", required=True, help="Entity name")
+    update_parser.add_argument("--name", required=True, help="Category name")
+    update_parser.add_argument("--description", help="New description")
+    update_parser.add_argument("--json", action="store_true", help="Output JSON")
+
+    # delete
+    delete_parser = subparsers.add_parser("delete", help="Delete a category")
+    delete_parser.add_argument("--entity", required=True, help="Entity name")
+    delete_parser.add_argument("--name", required=True, help="Category name")
+    delete_parser.add_argument("--reassign", help="Reassign transactions to this category")
+    delete_parser.add_argument("--json", action="store_true", help="Output JSON")
+
+    # list
+    list_parser = subparsers.add_parser("list", help="List all categories")
+    list_parser.add_argument("--entity", help="Filter by entity")
+    list_parser.add_argument("--json", action="store_true", help="Output JSON")
+
+    args = parser.parse_args()
+
+    if not DB_PATH.exists():
+        if getattr(args, 'json', False):
+            print(json.dumps({"error": "Database not found. Run ./scripts/init first."}))
+        else:
+            print("Database not found. Run ./scripts/init first.")
+        sys.exit(1)
+
+    if args.command == "add":
+        cmd_add(args)
+    elif args.command == "update":
+        cmd_update(args)
+    elif args.command == "delete":
+        cmd_delete(args)
+    elif args.command == "list":
+        cmd_list(args)
+    else:
+        parser.print_help()
+
+
+if __name__ == "__main__":
+    main()

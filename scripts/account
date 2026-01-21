@@ -1,0 +1,313 @@
+#!/usr/bin/env python3
+"""Manage accounts. No external dependencies."""
+import argparse
+import json
+import sqlite3
+import sys
+from pathlib import Path
+
+SCRIPT_DIR = Path(__file__).parent
+BASE_DIR = SCRIPT_DIR.parent
+DB_PATH = BASE_DIR / "oink.db"
+
+
+def get_db():
+    """Get database connection with foreign keys enabled."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    return conn
+
+
+def cmd_add(args):
+    """Add a new account."""
+    conn = get_db()
+
+    # Find entity
+    entity = conn.execute("SELECT id, name FROM entities WHERE name = ?", (args.entity,)).fetchone()
+    if not entity:
+        entities = conn.execute("SELECT name FROM entities ORDER BY name").fetchall()
+        if args.json:
+            print(json.dumps({
+                "error": f"Entity '{args.entity}' not found",
+                "available_entities": [e['name'] for e in entities],
+                "hint": f"Create it first with: ./scripts/entity add --name '{args.entity}'"
+            }))
+        else:
+            print(f"Entity '{args.entity}' not found")
+            if entities:
+                print("Available entities:")
+                for e in entities:
+                    print(f"  - {e['name']}")
+            print(f"\nCreate it first with: ./scripts/entity add --name '{args.entity}'")
+        sys.exit(1)
+
+    # Check for duplicate account name
+    existing = conn.execute("SELECT id FROM accounts WHERE name = ?", (args.name,)).fetchone()
+    if existing:
+        if args.json:
+            print(json.dumps({"error": f"Account '{args.name}' already exists"}))
+        else:
+            print(f"Account '{args.name}' already exists")
+        sys.exit(1)
+
+    # Validate currency
+    currency = args.currency.upper()
+    if currency not in ('CAD', 'USD'):
+        if args.json:
+            print(json.dumps({"error": f"Invalid currency '{currency}'. Must be CAD or USD"}))
+        else:
+            print(f"Invalid currency '{currency}'. Must be CAD or USD")
+        sys.exit(1)
+
+    # Validate account type
+    account_type = args.account_type.lower()
+    if account_type not in ('asset', 'liability'):
+        if args.json:
+            print(json.dumps({"error": f"Invalid account type '{account_type}'. Must be asset or liability"}))
+        else:
+            print(f"Invalid account type '{account_type}'. Must be asset or liability")
+        sys.exit(1)
+
+    cursor = conn.execute(
+        """INSERT INTO accounts (entity_id, name, currency, account_type, bank_account_id, description)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        (entity['id'], args.name, currency, account_type, args.bank_account_id, args.description)
+    )
+    account_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+
+    if args.json:
+        print(json.dumps({
+            "success": True,
+            "id": account_id,
+            "entity": entity['name'],
+            "name": args.name,
+            "currency": currency,
+            "account_type": account_type
+        }))
+    else:
+        print(f"Created account: {args.name} ({currency}, {account_type}) for {entity['name']}")
+
+
+def cmd_update(args):
+    """Update an account."""
+    conn = get_db()
+
+    # Find entity
+    entity = conn.execute("SELECT id, name FROM entities WHERE name = ?", (args.entity,)).fetchone()
+    if not entity:
+        entities = conn.execute("SELECT name FROM entities ORDER BY name").fetchall()
+        if args.json:
+            print(json.dumps({
+                "error": f"Entity '{args.entity}' not found",
+                "available_entities": [e['name'] for e in entities]
+            }))
+        else:
+            print(f"Entity '{args.entity}' not found")
+            if entities:
+                print("Available entities:")
+                for e in entities:
+                    print(f"  - {e['name']}")
+        sys.exit(1)
+
+    account = conn.execute(
+        "SELECT id, name FROM accounts WHERE name = ? AND entity_id = ?", (args.name, entity['id'])
+    ).fetchone()
+    if not account:
+        if args.json:
+            print(json.dumps({"error": f"Account '{args.name}' not found"}))
+        else:
+            print(f"Account '{args.name}' not found")
+        sys.exit(1)
+
+    updates = []
+    params = []
+
+    if args.description is not None:
+        updates.append("description = ?")
+        params.append(args.description)
+
+    if args.bank_account_id is not None:
+        updates.append("bank_account_id = ?")
+        params.append(args.bank_account_id)
+
+    if updates:
+        params.append(account['id'])
+        conn.execute(f"UPDATE accounts SET {', '.join(updates)} WHERE id = ?", params)
+        conn.commit()
+
+    if args.json:
+        print(json.dumps({"success": True, "name": args.name}))
+    else:
+        print(f"Updated account: {args.name}")
+
+    conn.close()
+
+
+def cmd_delete(args):
+    """Delete an account."""
+    conn = get_db()
+
+    # Find entity
+    entity = conn.execute("SELECT id, name FROM entities WHERE name = ?", (args.entity,)).fetchone()
+    if not entity:
+        entities = conn.execute("SELECT name FROM entities ORDER BY name").fetchall()
+        if args.json:
+            print(json.dumps({
+                "error": f"Entity '{args.entity}' not found",
+                "available_entities": [e['name'] for e in entities]
+            }))
+        else:
+            print(f"Entity '{args.entity}' not found")
+            if entities:
+                print("Available entities:")
+                for e in entities:
+                    print(f"  - {e['name']}")
+        sys.exit(1)
+
+    account = conn.execute(
+        "SELECT id, name FROM accounts WHERE name = ? AND entity_id = ?", (args.name, entity['id'])
+    ).fetchone()
+    if not account:
+        if args.json:
+            print(json.dumps({"error": f"Account '{args.name}' not found"}))
+        else:
+            print(f"Account '{args.name}' not found")
+        sys.exit(1)
+
+    # Check for transactions
+    tx_count = conn.execute(
+        "SELECT COUNT(*) FROM transactions WHERE account_id = ?", (account['id'],)
+    ).fetchone()[0]
+
+    if tx_count > 0:
+        if args.json:
+            print(json.dumps({
+                "error": f"Cannot delete account '{args.name}': has {tx_count} transaction(s)",
+                "hint": "Delete transactions first or use a different approach"
+            }))
+        else:
+            print(f"Cannot delete account '{args.name}': has {tx_count} transaction(s)")
+        sys.exit(1)
+
+    # Check for import batches
+    batch_count = conn.execute(
+        "SELECT COUNT(*) FROM import_batches WHERE account_id = ?", (account['id'],)
+    ).fetchone()[0]
+
+    if batch_count > 0:
+        conn.execute("DELETE FROM import_batches WHERE account_id = ?", (account['id'],))
+
+    conn.execute("DELETE FROM accounts WHERE id = ?", (account['id'],))
+    conn.commit()
+    conn.close()
+
+    if args.json:
+        print(json.dumps({"success": True, "name": args.name}))
+    else:
+        print(f"Deleted account: {args.name}")
+
+
+def cmd_list(args):
+    """List all accounts."""
+    conn = get_db()
+
+    params = []
+    entity_filter = ""
+    if args.entity:
+        entity_filter = "WHERE e.name = ?"
+        params.append(args.entity)
+
+    rows = conn.execute(f"""
+        SELECT a.id, e.name as entity, a.name, a.currency, a.account_type,
+               a.bank_account_id, a.description,
+               COUNT(t.id) as tx_count,
+               COALESCE(SUM(CAST(t.amount AS REAL)), 0) as balance
+        FROM accounts a
+        JOIN entities e ON a.entity_id = e.id
+        LEFT JOIN transactions t ON a.id = t.account_id
+        {entity_filter}
+        GROUP BY a.id
+        ORDER BY e.name, a.name
+    """, params).fetchall()
+
+    conn.close()
+
+    if args.json:
+        result = []
+        for r in rows:
+            d = dict(r)
+            d['balance'] = round(d['balance'], 2)
+            result.append(d)
+        print(json.dumps({"accounts": result}))
+    else:
+        if not rows:
+            print("No accounts found.")
+            print("Create one with: ./scripts/account add --entity <entity> --name <name> --currency CAD")
+            return
+
+        print(f"\n{'ID':<4} {'Entity':<10} {'Name':<18} {'Type':<8} {'Currency':<6} {'Transactions':>10} {'Balance':>15}")
+        print("-" * 80)
+        for row in rows:
+            balance_str = f"{row['currency']} {row['balance']:,.2f}"
+            print(f"{row['id']:<4} {row['entity']:<10} {row['name']:<18} {row['account_type']:<8} {row['currency']:<6} {row['tx_count']:>10} {balance_str:>15}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Manage Oink accounts")
+    subparsers = parser.add_subparsers(dest="command", help="Command")
+
+    # add
+    add_parser = subparsers.add_parser("add", help="Add a new account")
+    add_parser.add_argument("--entity", required=True, help="Entity name")
+    add_parser.add_argument("--name", required=True, help="Account name")
+    add_parser.add_argument("--currency", required=True, help="Currency (CAD or USD)")
+    add_parser.add_argument("--account-type", default="asset", help="Account type (asset or liability)")
+    add_parser.add_argument("--bank-account-id", help="Bank account ID for OFX matching")
+    add_parser.add_argument("--description", help="Description")
+    add_parser.add_argument("--json", action="store_true", help="Output JSON")
+
+    # update
+    update_parser = subparsers.add_parser("update", help="Update an account")
+    update_parser.add_argument("--entity", required=True, help="Entity name")
+    update_parser.add_argument("--name", required=True, help="Account name")
+    update_parser.add_argument("--description", help="New description")
+    update_parser.add_argument("--bank-account-id", help="Bank account ID")
+    update_parser.add_argument("--json", action="store_true", help="Output JSON")
+
+    # delete
+    delete_parser = subparsers.add_parser("delete", help="Delete an account")
+    delete_parser.add_argument("--entity", required=True, help="Entity name")
+    delete_parser.add_argument("--name", required=True, help="Account name")
+    delete_parser.add_argument("--json", action="store_true", help="Output JSON")
+
+    # list
+    list_parser = subparsers.add_parser("list", help="List all accounts")
+    list_parser.add_argument("--entity", help="Filter by entity")
+    list_parser.add_argument("--json", action="store_true", help="Output JSON")
+
+    args = parser.parse_args()
+
+    if not DB_PATH.exists():
+        if getattr(args, 'json', False):
+            print(json.dumps({"error": "Database not found. Run ./scripts/init first."}))
+        else:
+            print("Database not found. Run ./scripts/init first.")
+        sys.exit(1)
+
+    if args.command == "add":
+        cmd_add(args)
+    elif args.command == "update":
+        cmd_update(args)
+    elif args.command == "delete":
+        cmd_delete(args)
+    elif args.command == "list":
+        cmd_list(args)
+    else:
+        parser.print_help()
+
+
+if __name__ == "__main__":
+    main()

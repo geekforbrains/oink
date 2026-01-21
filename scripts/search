@@ -1,0 +1,208 @@
+#!/usr/bin/env python3
+"""Search transactions. No external dependencies."""
+import argparse
+import json
+import re
+import sqlite3
+import sys
+from decimal import Decimal
+from pathlib import Path
+
+SCRIPT_DIR = Path(__file__).parent
+BASE_DIR = SCRIPT_DIR.parent
+DB_PATH = BASE_DIR / "oink.db"
+
+
+def get_db():
+    """Get database connection with foreign keys enabled."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    return conn
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Search transactions")
+    parser.add_argument("--entity", help="Filter by entity name")
+    parser.add_argument("--account", help="Filter by account name")
+    parser.add_argument("--category", help="Filter by category name")
+    parser.add_argument("--description", help="Search description (regex)")
+    parser.add_argument("--display-name", help="Search display name (regex)")
+    parser.add_argument("--from", dest="date_from", help="Start date (YYYY-MM-DD)")
+    parser.add_argument("--to", dest="date_to", help="End date (YYYY-MM-DD)")
+    parser.add_argument("--year", help="Filter by year (YYYY)")
+    parser.add_argument("--month", help="Filter by month (YYYY-MM)")
+    parser.add_argument("--min-amount", type=float, help="Minimum amount (absolute value)")
+    parser.add_argument("--max-amount", type=float, help="Maximum amount (absolute value)")
+    parser.add_argument("--type", choices=['income', 'expense', 'transfer'], help="Filter by category type")
+    parser.add_argument("--uncategorized", action="store_true", help="Only uncategorized transactions")
+    parser.add_argument("--limit", type=int, default=50, help="Limit results (default 50, 0 for all)")
+    parser.add_argument("--json", action="store_true", help="Output JSON")
+    args = parser.parse_args()
+
+    if not DB_PATH.exists():
+        if args.json:
+            print(json.dumps({"error": "Database not found. Run ./scripts/init first."}))
+        else:
+            print("Database not found. Run ./scripts/init first.")
+        sys.exit(1)
+
+    conn = get_db()
+
+    # Build query with filters
+    conditions = []
+    params = []
+
+    if args.entity:
+        conditions.append("e.name = ?")
+        params.append(args.entity)
+
+    if args.account:
+        conditions.append("a.name = ?")
+        params.append(args.account)
+
+    if args.category:
+        conditions.append("c.name = ?")
+        params.append(args.category)
+
+    if args.date_from:
+        conditions.append("t.date >= ?")
+        params.append(args.date_from)
+
+    if args.date_to:
+        conditions.append("t.date <= ?")
+        params.append(args.date_to)
+
+    if args.year:
+        conditions.append("strftime('%Y', t.date) = ?")
+        params.append(args.year)
+
+    if args.month:
+        conditions.append("strftime('%Y-%m', t.date) = ?")
+        params.append(args.month)
+
+    if args.min_amount is not None:
+        conditions.append("ABS(CAST(t.amount AS REAL)) >= ?")
+        params.append(args.min_amount)
+
+    if args.max_amount is not None:
+        conditions.append("ABS(CAST(t.amount AS REAL)) <= ?")
+        params.append(args.max_amount)
+
+    if args.type:
+        conditions.append("c.type = ?")
+        params.append(args.type)
+
+    if args.uncategorized:
+        conditions.append("t.category_id IS NULL")
+
+    where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
+    # Don't apply SQL limit if we have regex filters - apply after regex filtering
+    has_regex = args.description or args.display_name
+    limit_clause = "" if has_regex else (f"LIMIT {args.limit}" if args.limit else "")
+
+    query = f"""
+        SELECT t.id, t.date, e.name as entity, a.name as account, a.currency,
+               t.description, t.display_name, t.amount, c.name as category, c.type as category_type,
+               t.reconciled, t.notes
+        FROM transactions t
+        JOIN accounts a ON t.account_id = a.id
+        JOIN entities e ON a.entity_id = e.id
+        LEFT JOIN categories c ON t.category_id = c.id
+        {where_clause}
+        ORDER BY t.date DESC, t.id DESC
+        {limit_clause}
+    """
+    rows = conn.execute(query, params).fetchall()
+
+    # Apply regex filters in Python (SQLite regex support is limited)
+    filtered_rows = []
+    for row in rows:
+        if args.description:
+            try:
+                if not re.search(args.description, row['description'], re.IGNORECASE):
+                    continue
+            except re.error as e:
+                if args.json:
+                    print(json.dumps({"error": f"Invalid regex in --description: {e}"}))
+                else:
+                    print(f"Invalid regex in --description: {e}")
+                sys.exit(1)
+
+        if args.display_name:
+            display = row['display_name'] or ''
+            try:
+                if not re.search(args.display_name, display, re.IGNORECASE):
+                    continue
+            except re.error as e:
+                if args.json:
+                    print(json.dumps({"error": f"Invalid regex in --display-name: {e}"}))
+                else:
+                    print(f"Invalid regex in --display-name: {e}")
+                sys.exit(1)
+
+        filtered_rows.append(row)
+
+    # Apply limit after regex filtering
+    total_filtered = len(filtered_rows)
+    if args.limit and has_regex:
+        filtered_rows = filtered_rows[:args.limit]
+
+    # Get total count
+    count_query = f"""
+        SELECT COUNT(*) as count
+        FROM transactions t
+        JOIN accounts a ON t.account_id = a.id
+        JOIN entities e ON a.entity_id = e.id
+        LEFT JOIN categories c ON t.category_id = c.id
+        {where_clause}
+    """
+    total_db_count = conn.execute(count_query, params).fetchone()['count']
+
+    conn.close()
+
+    if args.json:
+        result = []
+        for r in filtered_rows:
+            result.append({
+                "id": r['id'],
+                "date": r['date'],
+                "entity": r['entity'],
+                "account": r['account'],
+                "currency": r['currency'],
+                "description": r['description'],
+                "display_name": r['display_name'],
+                "amount": r['amount'],
+                "category": r['category'],
+                "category_type": r['category_type'],
+                "reconciled": bool(r['reconciled']),
+                "notes": r['notes']
+            })
+        print(json.dumps({"count": len(result), "transactions": result}))
+    else:
+        if not filtered_rows:
+            print("No transactions found matching criteria")
+            return
+
+        shown_text = f" (showing {len(filtered_rows)})" if args.limit and len(filtered_rows) >= args.limit else ""
+        print(f"\n{len(filtered_rows)} transaction(s) found{shown_text}:\n")
+        print(f"{'ID':<6} {'Date':<12} {'Entity':<10} {'Display Name':<20} {'Category':<15} {'Amount':>14}")
+        print("-" * 85)
+
+        total = Decimal('0')
+        for row in filtered_rows:
+            amount = Decimal(row['amount'])
+            total += amount
+            amt_str = f"{row['currency']} {amount:,.2f}"
+            display = (row['display_name'] or row['description'])[:18]
+            if len(row['display_name'] or row['description']) > 20:
+                display += '..'
+            cat = (row['category'] or 'Uncategorized')[:13]
+            print(f"{row['id']:<6} {row['date']:<12} {row['entity']:<10} {display:<20} {cat:<15} {amt_str:>14}")
+
+        print("-" * 85)
+        print(f"{'Total:':<65} {total:>14,.2f}")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,495 @@
+#!/usr/bin/env python3
+"""Manage patterns. No external dependencies."""
+import argparse
+import json
+import re
+import sqlite3
+import sys
+from pathlib import Path
+
+SCRIPT_DIR = Path(__file__).parent
+BASE_DIR = SCRIPT_DIR.parent
+DB_PATH = BASE_DIR / "oink.db"
+
+
+def get_db():
+    """Get database connection with foreign keys enabled."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    return conn
+
+
+def find_pattern(conn, args):
+    """Find a pattern by --id or by --entity and --pattern."""
+    if args.id:
+        pattern = conn.execute(
+            "SELECT p.*, e.name as entity_name FROM transaction_patterns p JOIN entities e ON p.entity_id = e.id WHERE p.id = ?",
+            (args.id,)
+        ).fetchone()
+        if not pattern:
+            if args.json:
+                print(json.dumps({"error": f"Pattern with id {args.id} not found"}))
+            else:
+                print(f"Pattern with id {args.id} not found")
+            sys.exit(1)
+        return pattern
+    elif args.entity and args.match:
+        # Find entity first
+        entity = conn.execute("SELECT id, name FROM entities WHERE name = ?", (args.entity,)).fetchone()
+        if not entity:
+            entities = conn.execute("SELECT name FROM entities ORDER BY name").fetchall()
+            if args.json:
+                print(json.dumps({
+                    "error": f"Entity '{args.entity}' not found",
+                    "available_entities": [e['name'] for e in entities]
+                }))
+            else:
+                print(f"Entity '{args.entity}' not found")
+                if entities:
+                    print("Available entities:")
+                    for e in entities:
+                        print(f"  - {e['name']}")
+            sys.exit(1)
+
+        pattern = conn.execute(
+            "SELECT p.*, e.name as entity_name FROM transaction_patterns p JOIN entities e ON p.entity_id = e.id WHERE p.pattern = ? AND p.entity_id = ?",
+            (args.match, entity['id'])
+        ).fetchone()
+        if not pattern:
+            if args.json:
+                print(json.dumps({"error": f"Pattern '{args.match}' not found for entity '{args.entity}'"}))
+            else:
+                print(f"Pattern '{args.match}' not found for entity '{args.entity}'")
+            sys.exit(1)
+        return pattern
+    else:
+        if args.json:
+            print(json.dumps({"error": "Must specify either --id or both --entity and --match"}))
+        else:
+            print("Must specify either --id or both --entity and --match")
+        sys.exit(1)
+
+
+def cmd_add(args):
+    """Add a new pattern."""
+    conn = get_db()
+
+    # Validate regex
+    try:
+        re.compile(args.pattern)
+    except re.error as e:
+        if args.json:
+            print(json.dumps({"error": f"Invalid regex pattern: {e}"}))
+        else:
+            print(f"Invalid regex pattern: {e}")
+        sys.exit(1)
+
+    # Find entity
+    entity = conn.execute("SELECT id, name FROM entities WHERE name = ?", (args.entity,)).fetchone()
+    if not entity:
+        entities = conn.execute("SELECT name FROM entities ORDER BY name").fetchall()
+        if args.json:
+            print(json.dumps({
+                "error": f"Entity '{args.entity}' not found",
+                "available_entities": [e['name'] for e in entities]
+            }))
+        else:
+            print(f"Entity '{args.entity}' not found")
+            if entities:
+                print("Available entities:")
+                for e in entities:
+                    print(f"  - {e['name']}")
+        sys.exit(1)
+
+    # Find category if specified
+    category_id = None
+    if args.category:
+        cat = conn.execute("""
+            SELECT id, name, type FROM categories
+            WHERE name = ? AND entity_id = ?
+        """, (args.category, entity['id'])).fetchone()
+
+        if not cat:
+            cats = conn.execute("""
+                SELECT name, type FROM categories
+                WHERE entity_id = ?
+                ORDER BY type, name
+            """, (entity['id'],)).fetchall()
+
+            if args.json:
+                print(json.dumps({
+                    "error": f"Category '{args.category}' not found for entity '{entity['name']}'",
+                    "available_categories": [{"name": c['name'], "type": c['type']} for c in cats]
+                }))
+            else:
+                print(f"Category '{args.category}' not found for entity '{entity['name']}'")
+                if cats:
+                    print("Available categories:")
+                    for c in cats:
+                        print(f"  - {c['name']} ({c['type']})")
+            sys.exit(1)
+
+        category_id = cat['id']
+
+    # Insert pattern
+    cursor = conn.execute("""
+        INSERT INTO transaction_patterns (entity_id, pattern, display_name, category_id, priority, notes)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (entity['id'], args.pattern, args.display_name, category_id, args.priority, args.notes))
+    pattern_id = cursor.lastrowid
+    conn.commit()
+
+    result = {
+        "success": True,
+        "pattern_id": pattern_id,
+        "entity": entity['name'],
+        "pattern": args.pattern,
+        "display_name": args.display_name,
+        "category": args.category,
+        "priority": args.priority
+    }
+
+    # Apply to existing transactions if requested
+    applied = 0
+    if args.apply:
+        uncategorized = conn.execute("""
+            SELECT t.id, t.description
+            FROM transactions t
+            JOIN accounts a ON t.account_id = a.id
+            WHERE t.category_id IS NULL AND a.entity_id = ?
+        """, (entity['id'],)).fetchall()
+
+        for tx in uncategorized:
+            if re.search(args.pattern, tx['description']):
+                conn.execute("""
+                    UPDATE transactions SET category_id = ?, display_name = ?
+                    WHERE id = ?
+                """, (category_id, args.display_name, tx['id']))
+                applied += 1
+
+        conn.commit()
+        result["applied_to"] = applied
+
+    conn.close()
+
+    if args.json:
+        print(json.dumps(result))
+    else:
+        print(f"Pattern added for {entity['name']}: '{args.pattern}' -> '{args.display_name}'")
+        if args.category:
+            print(f"  Category: {args.category}")
+        else:
+            print("  Category: None (manual categorization)")
+        print(f"  Priority: {args.priority}")
+        if args.apply:
+            print(f"  Applied to {applied} existing transaction(s)")
+
+
+def cmd_update(args):
+    """Update a pattern."""
+    conn = get_db()
+    pattern = find_pattern(conn, args)
+
+    updates = []
+    params = []
+
+    if args.pattern is not None:
+        # Validate regex
+        try:
+            re.compile(args.pattern)
+        except re.error as e:
+            if args.json:
+                print(json.dumps({"error": f"Invalid regex pattern: {e}"}))
+            else:
+                print(f"Invalid regex pattern: {e}")
+            sys.exit(1)
+        updates.append("pattern = ?")
+        params.append(args.pattern)
+
+    if args.display_name is not None:
+        updates.append("display_name = ?")
+        params.append(args.display_name)
+
+    if args.priority is not None:
+        updates.append("priority = ?")
+        params.append(args.priority)
+
+    if args.notes is not None:
+        updates.append("notes = ?")
+        params.append(args.notes)
+
+    if args.category is not None:
+        if args.category == "":
+            # Clear category
+            updates.append("category_id = NULL")
+        else:
+            cat = conn.execute("""
+                SELECT id FROM categories WHERE name = ? AND entity_id = ?
+            """, (args.category, pattern['entity_id'])).fetchone()
+            if not cat:
+                if args.json:
+                    print(json.dumps({"error": f"Category '{args.category}' not found"}))
+                else:
+                    print(f"Category '{args.category}' not found")
+                sys.exit(1)
+            updates.append("category_id = ?")
+            params.append(cat['id'])
+
+    if updates:
+        params.append(pattern['id'])
+        conn.execute(f"UPDATE transaction_patterns SET {', '.join(updates)} WHERE id = ?", params)
+        conn.commit()
+
+    if args.json:
+        print(json.dumps({"success": True, "id": pattern['id']}))
+    else:
+        print(f"Updated pattern: {pattern['id']}")
+
+    conn.close()
+
+
+def cmd_delete(args):
+    """Delete a pattern."""
+    conn = get_db()
+    pattern = find_pattern(conn, args)
+
+    conn.execute("DELETE FROM transaction_patterns WHERE id = ?", (pattern['id'],))
+    conn.commit()
+    conn.close()
+
+    if args.json:
+        print(json.dumps({"success": True, "id": pattern['id']}))
+    else:
+        print(f"Deleted pattern: {pattern['id']}")
+
+
+def cmd_enable(args):
+    """Enable a pattern."""
+    conn = get_db()
+    pattern = find_pattern(conn, args)
+
+    conn.execute("UPDATE transaction_patterns SET is_active = 1 WHERE id = ?", (pattern['id'],))
+    conn.commit()
+    conn.close()
+
+    if args.json:
+        print(json.dumps({"success": True, "id": pattern['id'], "is_active": True}))
+    else:
+        print(f"Enabled pattern: {pattern['id']}")
+
+
+def cmd_disable(args):
+    """Disable a pattern."""
+    conn = get_db()
+    pattern = find_pattern(conn, args)
+
+    conn.execute("UPDATE transaction_patterns SET is_active = 0 WHERE id = ?", (pattern['id'],))
+    conn.commit()
+    conn.close()
+
+    if args.json:
+        print(json.dumps({"success": True, "id": pattern['id'], "is_active": False}))
+    else:
+        print(f"Disabled pattern: {pattern['id']}")
+
+
+def cmd_test(args):
+    """Test a pattern against existing transactions."""
+    conn = get_db()
+
+    # Validate regex
+    try:
+        regex = re.compile(args.pattern)
+    except re.error as e:
+        if args.json:
+            print(json.dumps({"error": f"Invalid regex pattern: {e}"}))
+        else:
+            print(f"Invalid regex pattern: {e}")
+        sys.exit(1)
+
+    # Find entity
+    entity = conn.execute("SELECT id, name FROM entities WHERE name = ?", (args.entity,)).fetchone()
+    if not entity:
+        if args.json:
+            print(json.dumps({"error": f"Entity '{args.entity}' not found"}))
+        else:
+            print(f"Entity '{args.entity}' not found")
+        sys.exit(1)
+
+    # Find matching transactions
+    transactions = conn.execute("""
+        SELECT t.id, t.date, t.description, t.amount, t.display_name, c.name as category
+        FROM transactions t
+        JOIN accounts a ON t.account_id = a.id
+        LEFT JOIN categories c ON t.category_id = c.id
+        WHERE a.entity_id = ?
+        ORDER BY t.date DESC
+    """, (entity['id'],)).fetchall()
+
+    matches = []
+    for tx in transactions:
+        if regex.search(tx['description']):
+            matches.append({
+                "id": tx['id'],
+                "date": tx['date'],
+                "description": tx['description'],
+                "amount": tx['amount'],
+                "display_name": tx['display_name'],
+                "category": tx['category']
+            })
+
+    conn.close()
+
+    if args.json:
+        print(json.dumps({"matches": matches, "count": len(matches)}))
+    else:
+        if not matches:
+            print(f"No transactions match pattern: {args.pattern}")
+            return
+
+        print(f"\n{len(matches)} transaction(s) match pattern: {args.pattern}\n")
+        print(f"{'ID':<6} {'Date':<12} {'Amount':>12} {'Category':<15} {'Description':<40}")
+        print("-" * 90)
+        for m in matches[:50]:  # Limit display to first 50
+            desc = m['description'][:38] + '..' if len(m['description']) > 40 else m['description']
+            cat = (m['category'] or 'Uncategorized')[:13]
+            print(f"{m['id']:<6} {m['date']:<12} {float(m['amount']):>12,.2f} {cat:<15} {desc:<40}")
+
+        if len(matches) > 50:
+            print(f"\n... and {len(matches) - 50} more")
+
+
+def cmd_list(args):
+    """List all patterns."""
+    conn = get_db()
+
+    params = []
+    entity_filter = ""
+    if args.entity:
+        entity_filter = "WHERE e.name = ? OR p.entity_id IS NULL"
+        params.append(args.entity)
+
+    rows = conn.execute(f"""
+        SELECT p.id, COALESCE(e.name, 'Global') as entity, p.pattern, p.display_name,
+               c.name as category, p.priority, p.is_active, p.notes
+        FROM transaction_patterns p
+        LEFT JOIN entities e ON p.entity_id = e.id
+        LEFT JOIN categories c ON p.category_id = c.id
+        {entity_filter}
+        ORDER BY e.name, p.priority DESC, p.id
+    """, params).fetchall()
+
+    conn.close()
+
+    if args.json:
+        result = []
+        for r in rows:
+            d = dict(r)
+            d['is_active'] = bool(d['is_active'])
+            result.append(d)
+        print(json.dumps({"patterns": result}))
+    else:
+        if not rows:
+            print("No patterns found.")
+            print("Create one with: ./scripts/pattern add --entity <entity> --pattern <regex> --display-name <name>")
+            return
+
+        print(f"\n{'ID':<4} {'Entity':<10} {'Pri':<4} {'Pattern':<25} {'Display Name':<18} {'Category':<18} {'Active':<6}")
+        print("-" * 95)
+        for row in rows:
+            pattern = row['pattern'][:23] + '..' if len(row['pattern']) > 25 else row['pattern']
+            display = row['display_name'][:16] + '..' if len(row['display_name']) > 18 else row['display_name']
+            category = (row['category'] or 'Manual')[:16]
+            active = 'Yes' if row['is_active'] else 'No'
+            print(f"{row['id']:<4} {row['entity']:<10} {row['priority']:<4} {pattern:<25} {display:<18} {category:<18} {active:<6}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Manage Oink patterns")
+    subparsers = parser.add_subparsers(dest="command", help="Command")
+
+    # add
+    add_parser = subparsers.add_parser("add", help="Add a new pattern")
+    add_parser.add_argument("--entity", required=True, help="Entity name")
+    add_parser.add_argument("--pattern", required=True, help="Regex pattern to match")
+    add_parser.add_argument("--display-name", required=True, help="Display name for matched transactions")
+    add_parser.add_argument("--category", help="Category name (optional)")
+    add_parser.add_argument("--priority", type=int, default=100, help="Priority (higher = matched first)")
+    add_parser.add_argument("--notes", help="Notes (optional)")
+    add_parser.add_argument("--apply", action="store_true", help="Apply to existing uncategorized transactions")
+    add_parser.add_argument("--json", action="store_true", help="Output JSON")
+
+    # update
+    update_parser = subparsers.add_parser("update", help="Update a pattern")
+    update_parser.add_argument("--id", type=int, help="Pattern ID (alternative to --entity/--match)")
+    update_parser.add_argument("--entity", help="Entity name (use with --match)")
+    update_parser.add_argument("--match", help="Pattern regex to find (use with --entity)")
+    update_parser.add_argument("--pattern", help="New regex pattern")
+    update_parser.add_argument("--display-name", help="New display name")
+    update_parser.add_argument("--category", help="New category (empty string to clear)")
+    update_parser.add_argument("--priority", type=int, help="New priority")
+    update_parser.add_argument("--notes", help="New notes")
+    update_parser.add_argument("--json", action="store_true", help="Output JSON")
+
+    # delete
+    delete_parser = subparsers.add_parser("delete", help="Delete a pattern")
+    delete_parser.add_argument("--id", type=int, help="Pattern ID (alternative to --entity/--match)")
+    delete_parser.add_argument("--entity", help="Entity name (use with --match)")
+    delete_parser.add_argument("--match", help="Pattern regex to find (use with --entity)")
+    delete_parser.add_argument("--json", action="store_true", help="Output JSON")
+
+    # enable
+    enable_parser = subparsers.add_parser("enable", help="Enable a pattern")
+    enable_parser.add_argument("--id", type=int, help="Pattern ID (alternative to --entity/--match)")
+    enable_parser.add_argument("--entity", help="Entity name (use with --match)")
+    enable_parser.add_argument("--match", help="Pattern regex to find (use with --entity)")
+    enable_parser.add_argument("--json", action="store_true", help="Output JSON")
+
+    # disable
+    disable_parser = subparsers.add_parser("disable", help="Disable a pattern")
+    disable_parser.add_argument("--id", type=int, help="Pattern ID (alternative to --entity/--match)")
+    disable_parser.add_argument("--entity", help="Entity name (use with --match)")
+    disable_parser.add_argument("--match", help="Pattern regex to find (use with --entity)")
+    disable_parser.add_argument("--json", action="store_true", help="Output JSON")
+
+    # test
+    test_parser = subparsers.add_parser("test", help="Test a pattern against existing transactions")
+    test_parser.add_argument("--entity", required=True, help="Entity name")
+    test_parser.add_argument("--pattern", required=True, help="Regex pattern to test")
+    test_parser.add_argument("--json", action="store_true", help="Output JSON")
+
+    # list
+    list_parser = subparsers.add_parser("list", help="List all patterns")
+    list_parser.add_argument("--entity", help="Filter by entity")
+    list_parser.add_argument("--json", action="store_true", help="Output JSON")
+
+    args = parser.parse_args()
+
+    if not DB_PATH.exists():
+        if getattr(args, 'json', False):
+            print(json.dumps({"error": "Database not found. Run ./scripts/init first."}))
+        else:
+            print("Database not found. Run ./scripts/init first.")
+        sys.exit(1)
+
+    if args.command == "add":
+        cmd_add(args)
+    elif args.command == "update":
+        cmd_update(args)
+    elif args.command == "delete":
+        cmd_delete(args)
+    elif args.command == "enable":
+        cmd_enable(args)
+    elif args.command == "disable":
+        cmd_disable(args)
+    elif args.command == "test":
+        cmd_test(args)
+    elif args.command == "list":
+        cmd_list(args)
+    else:
+        parser.print_help()
+
+
+if __name__ == "__main__":
+    main()

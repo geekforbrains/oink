@@ -1,0 +1,269 @@
+#!/usr/bin/env python3
+"""Import transactions from OFX file. No external dependencies."""
+import argparse
+import json
+import re
+import sqlite3
+import sys
+from pathlib import Path
+
+SCRIPT_DIR = Path(__file__).parent
+BASE_DIR = SCRIPT_DIR.parent
+DB_PATH = BASE_DIR / "oink.db"
+
+
+def parse_ofx(content):
+    """Parse OFX content and return structured data.
+
+    Note: This is duplicated in scripts/parse-ofx for standalone use.
+    Keep both implementations in sync.
+    """
+    result = {
+        "currency": None,
+        "account_id": None,
+        "date_start": None,
+        "date_end": None,
+        "transactions": []
+    }
+
+    # Extract currency
+    currency_match = re.search(r'<CURDEF>(\w+)', content)
+    if currency_match:
+        result["currency"] = currency_match.group(1)
+
+    # Extract account ID
+    acctid_match = re.search(r'<ACCTID>(\d+)', content)
+    if acctid_match:
+        result["account_id"] = acctid_match.group(1)
+
+    # Extract date range
+    dtstart_match = re.search(r'<DTSTART>(\d{8})', content)
+    dtend_match = re.search(r'<DTEND>(\d{8})', content)
+    if dtstart_match:
+        d = dtstart_match.group(1)
+        result["date_start"] = f"{d[:4]}-{d[4:6]}-{d[6:8]}"
+    if dtend_match:
+        d = dtend_match.group(1)
+        result["date_end"] = f"{d[:4]}-{d[4:6]}-{d[6:8]}"
+
+    # Extract transactions
+    tx_pattern = r'<STMTTRN>(.*?)</STMTTRN>'
+    tx_blocks = re.findall(tx_pattern, content, re.DOTALL)
+
+    for block in tx_blocks:
+        tx = {}
+
+        # TRNTYPE (CREDIT, DEBIT, etc.)
+        trntype = re.search(r'<TRNTYPE>(\w+)', block)
+        tx["trntype"] = trntype.group(1) if trntype else None
+
+        # DTPOSTED - date posted (YYYYMMDD format, may have time/timezone suffix)
+        dtposted = re.search(r'<DTPOSTED>(\d{8})', block)
+        if dtposted:
+            d = dtposted.group(1)
+            tx["date"] = f"{d[:4]}-{d[4:6]}-{d[6:8]}"
+        else:
+            tx["date"] = None
+
+        # TRNAMT - amount (may be negative)
+        trnamt = re.search(r'<TRNAMT>(-?\d+\.?\d*)', block)
+        tx["amount"] = trnamt.group(1) if trnamt else None
+
+        # FITID - unique transaction ID
+        fitid = re.search(r'<FITID>(\S+)', block)
+        tx["fitid"] = fitid.group(1) if fitid else None
+
+        # NAME - description/memo (may contain spaces, ends at next tag or newline)
+        name = re.search(r'<NAME>([^<\n]+)', block)
+        tx["name"] = name.group(1).strip() if name else None
+
+        result["transactions"].append(tx)
+
+    return result
+
+
+def get_db():
+    """Get database connection with foreign keys enabled."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    return conn
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Import OFX file")
+    parser.add_argument("--file", required=True, help="OFX file to import")
+    parser.add_argument("--account", required=True, help="Account name")
+    parser.add_argument("--json", action="store_true", help="Output JSON")
+    args = parser.parse_args()
+
+    path = Path(args.file)
+    if not path.exists():
+        if args.json:
+            print(json.dumps({"error": f"File not found: {args.file}"}))
+        else:
+            print(f"File not found: {args.file}")
+        sys.exit(1)
+
+    if path.suffix.lower() != '.ofx':
+        if args.json:
+            print(json.dumps({"error": f"Expected .ofx file, got: {path.suffix}"}))
+        else:
+            print(f"Expected .ofx file, got: {path.suffix}")
+        sys.exit(1)
+
+    if not DB_PATH.exists():
+        if args.json:
+            print(json.dumps({"error": "Database not found. Run ./scripts/init first."}))
+        else:
+            print("Database not found. Run ./scripts/init first.")
+        sys.exit(1)
+
+    conn = get_db()
+
+    # Find account
+    acct = conn.execute("""
+        SELECT a.id, a.name, a.currency, a.entity_id, e.name as entity_name
+        FROM accounts a
+        JOIN entities e ON a.entity_id = e.id
+        WHERE a.name = ?
+    """, (args.account,)).fetchone()
+
+    if not acct:
+        accounts = conn.execute("""
+            SELECT a.name, e.name as entity
+            FROM accounts a
+            JOIN entities e ON a.entity_id = e.id
+        """).fetchall()
+        entities = conn.execute("SELECT name FROM entities").fetchall()
+
+        if args.json:
+            print(json.dumps({
+                "error": f"Account '{args.account}' not found",
+                "available_accounts": [{"name": a['name'], "entity": a['entity']} for a in accounts],
+                "hint": f"Create account with: ./scripts/account add --entity <entity> --name '{args.account}' --currency CAD"
+            }))
+        else:
+            print(f"Account '{args.account}' not found.")
+            print()
+
+            if not entities:
+                print("No entities exist yet. Create one first:")
+                print(f"  ./scripts/entity add --name 'Personal'")
+                print()
+                print("Then create the account:")
+                print(f"  ./scripts/account add --entity Personal --name '{args.account}' --currency CAD")
+            elif accounts:
+                print("Available accounts:")
+                for a in accounts:
+                    print(f"  - {a['name']} ({a['entity']})")
+                print()
+                print("Or create a new account:")
+                print(f"  ./scripts/account add --entity <entity> --name '{args.account}' --currency CAD")
+            else:
+                print("No accounts exist yet. Create one:")
+                entity_name = entities[0]['name']
+                print(f"  ./scripts/account add --entity {entity_name} --name '{args.account}' --currency CAD")
+
+        sys.exit(1)
+
+    # Parse OFX
+    content = path.read_text(encoding='utf-8', errors='replace')
+    ofx_data = parse_ofx(content)
+
+    # Load patterns for this entity only
+    patterns = conn.execute("""
+        SELECT id, pattern, display_name, category_id
+        FROM transaction_patterns
+        WHERE is_active = 1 AND entity_id = ?
+        ORDER BY priority DESC
+    """, (acct['entity_id'],)).fetchall()
+
+    # Create import batch
+    cursor = conn.execute("""
+        INSERT INTO import_batches (account_id, filename)
+        VALUES (?, ?)
+    """, (acct['id'], path.name))
+    batch_id = cursor.lastrowid
+
+    # Process transactions
+    imported = 0
+    skipped = 0
+    uncategorized = 0
+    dates = []
+
+    for tx in ofx_data["transactions"]:
+        fitid = tx["fitid"]
+        date_iso = tx["date"]
+        amount = tx["amount"]
+        name = tx["name"] or ""
+        trntype = tx["trntype"]
+
+        if date_iso:
+            dates.append(date_iso)
+
+        # Match against patterns
+        display_name = None
+        category_id = None
+        for p in patterns:
+            if re.search(p['pattern'], name):
+                display_name = p['display_name']
+                category_id = p['category_id']
+                break
+
+        # Insert transaction
+        try:
+            conn.execute("""
+                INSERT INTO transactions
+                (account_id, category_id, fitid, date, description, display_name, amount, trntype, import_batch_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (acct['id'], category_id, fitid, date_iso, name, display_name, amount, trntype, batch_id))
+            imported += 1
+            if category_id is None:
+                uncategorized += 1
+        except sqlite3.IntegrityError:
+            skipped += 1
+
+    # Update batch with stats
+    if dates:
+        conn.execute("""
+            UPDATE import_batches
+            SET statement_start_date = ?, statement_end_date = ?, transaction_count = ?
+            WHERE id = ?
+        """, (min(dates), max(dates), imported, batch_id))
+
+    conn.commit()
+
+    # Calculate batch total
+    total = conn.execute("""
+        SELECT SUM(CAST(amount AS REAL)) FROM transactions
+        WHERE import_batch_id = ?
+    """, (batch_id,)).fetchone()[0] or 0
+
+    conn.close()
+
+    result = {
+        "entity": acct['entity_name'],
+        "account": acct['name'],
+        "currency": acct['currency'],
+        "file": path.name,
+        "imported": imported,
+        "skipped": skipped,
+        "uncategorized": uncategorized,
+        "batch_total": round(total, 2)
+    }
+
+    if args.json:
+        print(json.dumps(result))
+    else:
+        print(f"\nImport complete for {acct['entity_name']} / {acct['name']} ({acct['currency']})")
+        print(f"  Imported: {imported}")
+        print(f"  Skipped (duplicates): {skipped}")
+        print(f"  Uncategorized: {uncategorized}")
+        print(f"  Batch total: {acct['currency']} {total:,.2f}")
+        if uncategorized > 0:
+            print(f"\nRun './scripts/uncategorized' to review")
+
+
+if __name__ == "__main__":
+    main()
