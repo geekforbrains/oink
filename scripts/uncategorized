@@ -39,7 +39,7 @@ def main():
     params = []
     entity_filter = ""
     if args.entity:
-        entity_filter = "AND e.name = ?"
+        entity_filter = "AND e.name = ? COLLATE NOCASE"
         params.append(args.entity)
 
     limit_clause = ""

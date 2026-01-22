@@ -54,15 +54,15 @@ def main():
     params = []
 
     if args.entity:
-        conditions.append("e.name = ?")
+        conditions.append("e.name = ? COLLATE NOCASE")
         params.append(args.entity)
 
     if args.account:
-        conditions.append("a.name = ?")
+        conditions.append("a.name = ? COLLATE NOCASE")
         params.append(args.account)
 
     if args.category:
-        conditions.append("c.name = ?")
+        conditions.append("c.name = ? COLLATE NOCASE")
         params.append(args.category)
 
     if args.date_from:

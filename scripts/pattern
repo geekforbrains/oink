@@ -35,8 +35,8 @@ def find_pattern(conn, args):
             sys.exit(1)
         return pattern
     elif args.entity and args.match:
-        # Find entity first
-        entity = conn.execute("SELECT id, name FROM entities WHERE name = ?", (args.entity,)).fetchone()
+        # Find entity first (case-insensitive)
+        entity = conn.execute("SELECT id, name FROM entities WHERE name = ? COLLATE NOCASE", (args.entity,)).fetchone()
         if not entity:
             entities = conn.execute("SELECT name FROM entities ORDER BY name").fetchall()
             if args.json:
@@ -85,8 +85,8 @@ def cmd_add(args):
             print(f"Invalid regex pattern: {e}")
         sys.exit(1)
 
-    # Find entity
-    entity = conn.execute("SELECT id, name FROM entities WHERE name = ?", (args.entity,)).fetchone()
+    # Find entity (case-insensitive)
+    entity = conn.execute("SELECT id, name FROM entities WHERE name = ? COLLATE NOCASE", (args.entity,)).fetchone()
     if not entity:
         entities = conn.execute("SELECT name FROM entities ORDER BY name").fetchall()
         if args.json:
@@ -107,7 +107,7 @@ def cmd_add(args):
     if args.category:
         cat = conn.execute("""
             SELECT id, name, type FROM categories
-            WHERE name = ? AND entity_id = ?
+            WHERE name = ? COLLATE NOCASE AND entity_id = ?
         """, (args.category, entity['id'])).fetchone()
 
         if not cat:
@@ -308,8 +308,8 @@ def cmd_test(args):
             print(f"Invalid regex pattern: {e}")
         sys.exit(1)
 
-    # Find entity
-    entity = conn.execute("SELECT id, name FROM entities WHERE name = ?", (args.entity,)).fetchone()
+    # Find entity (case-insensitive)
+    entity = conn.execute("SELECT id, name FROM entities WHERE name = ? COLLATE NOCASE", (args.entity,)).fetchone()
     if not entity:
         if args.json:
             print(json.dumps({"error": f"Entity '{args.entity}' not found"}))

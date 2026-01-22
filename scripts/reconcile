@@ -99,12 +99,12 @@ def cmd_status(args):
     params = []
     entity_filter = ""
     if args.entity:
-        entity_filter = "AND e.name = ?"
+        entity_filter = "AND e.name = ? COLLATE NOCASE"
         params.append(args.entity)
 
     account_filter = ""
     if args.account:
-        account_filter = "AND a.name = ?"
+        account_filter = "AND a.name = ? COLLATE NOCASE"
         params.append(args.account)
 
     query = f"""
@@ -161,11 +161,11 @@ def cmd_list(args):
     conditions = ["t.reconciled = 0"]
 
     if args.entity:
-        conditions.append("e.name = ?")
+        conditions.append("e.name = ? COLLATE NOCASE")
         params.append(args.entity)
 
     if args.account:
-        conditions.append("a.name = ?")
+        conditions.append("a.name = ? COLLATE NOCASE")
         params.append(args.account)
 
     where_clause = "WHERE " + " AND ".join(conditions)
@@ -234,9 +234,9 @@ def cmd_mark_all(args):
     """Mark all transactions for an account as reconciled."""
     conn = get_db()
 
-    # Find account
+    # Find account (case-insensitive)
     if args.entity:
-        entity = conn.execute("SELECT id FROM entities WHERE name = ?", (args.entity,)).fetchone()
+        entity = conn.execute("SELECT id FROM entities WHERE name = ? COLLATE NOCASE", (args.entity,)).fetchone()
         if not entity:
             if args.json:
                 print(json.dumps({"error": f"Entity '{args.entity}' not found"}))
@@ -245,12 +245,12 @@ def cmd_mark_all(args):
             sys.exit(1)
 
         account = conn.execute(
-            "SELECT id, name FROM accounts WHERE name = ? AND entity_id = ?",
+            "SELECT id, name FROM accounts WHERE name = ? COLLATE NOCASE AND entity_id = ?",
             (args.account, entity['id'])
         ).fetchone()
     else:
         account = conn.execute(
-            "SELECT id, name FROM accounts WHERE name = ?", (args.account,)
+            "SELECT id, name FROM accounts WHERE name = ? COLLATE NOCASE", (args.account,)
         ).fetchone()
 
     if not account:

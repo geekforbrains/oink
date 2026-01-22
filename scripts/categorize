@@ -52,10 +52,10 @@ def main():
             print(f"Transaction {args.id} not found")
         sys.exit(1)
 
-    # Find the category by name within this entity
+    # Find the category by name within this entity (case-insensitive)
     cat = conn.execute("""
         SELECT id, name, type FROM categories
-        WHERE name = ? AND entity_id = ?
+        WHERE name = ? COLLATE NOCASE AND entity_id = ?
     """, (args.category, tx['entity_id'])).fetchone()
 
     if not cat:

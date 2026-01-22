@@ -23,8 +23,8 @@ def cmd_add(args):
     """Add a new entity."""
     conn = get_db()
 
-    # Check for duplicates
-    existing = conn.execute("SELECT id FROM entities WHERE name = ?", (args.name,)).fetchone()
+    # Check for duplicates (case-insensitive)
+    existing = conn.execute("SELECT id FROM entities WHERE name = ? COLLATE NOCASE", (args.name,)).fetchone()
     if existing:
         if args.json:
             print(json.dumps({"error": f"Entity '{args.name}' already exists"}))
@@ -50,7 +50,7 @@ def cmd_update(args):
     """Update an entity."""
     conn = get_db()
 
-    entity = conn.execute("SELECT id FROM entities WHERE name = ?", (args.name,)).fetchone()
+    entity = conn.execute("SELECT id FROM entities WHERE name = ? COLLATE NOCASE", (args.name,)).fetchone()
     if not entity:
         if args.json:
             print(json.dumps({"error": f"Entity '{args.name}' not found"}))
@@ -74,7 +74,7 @@ def cmd_delete(args):
     """Delete an entity."""
     conn = get_db()
 
-    entity = conn.execute("SELECT id FROM entities WHERE name = ?", (args.name,)).fetchone()
+    entity = conn.execute("SELECT id FROM entities WHERE name = ? COLLATE NOCASE", (args.name,)).fetchone()
     if not entity:
         if args.json:
             print(json.dumps({"error": f"Entity '{args.name}' not found"}))

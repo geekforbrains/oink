@@ -28,7 +28,7 @@ def report_pnl(conn, year, entity, as_json):
         conditions.append("t.date LIKE ?")
         params.append(f"{year}%")
     if entity:
-        conditions.append("e.name = ?")
+        conditions.append("e.name = ? COLLATE NOCASE")
         params.append(entity)
 
     where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
@@ -149,7 +149,7 @@ def report_monthly(conn, year, entity, as_json):
         conditions.append("t.date LIKE ?")
         params.append(f"{year}%")
     if entity:
-        conditions.append("e.name = ?")
+        conditions.append("e.name = ? COLLATE NOCASE")
         params.append(entity)
 
     where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
@@ -338,7 +338,7 @@ def report_by_category(conn, year, entity, as_json):
         conditions.append("t.date LIKE ?")
         params.append(f"{year}%")
     if entity:
-        conditions.append("e.name = ?")
+        conditions.append("e.name = ? COLLATE NOCASE")
         params.append(entity)
 
     where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""

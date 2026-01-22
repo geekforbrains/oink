@@ -121,12 +121,12 @@ def main():
 
     conn = get_db()
 
-    # Find account
+    # Find account (case-insensitive)
     acct = conn.execute("""
         SELECT a.id, a.name, a.currency, a.entity_id, e.name as entity_name
         FROM accounts a
         JOIN entities e ON a.entity_id = e.id
-        WHERE a.name = ?
+        WHERE a.name = ? COLLATE NOCASE
     """, (args.account,)).fetchone()
 
     if not acct:

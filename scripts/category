@@ -23,8 +23,8 @@ def cmd_add(args):
     """Add a new category."""
     conn = get_db()
 
-    # Find entity
-    entity = conn.execute("SELECT id, name FROM entities WHERE name = ?", (args.entity,)).fetchone()
+    # Find entity (case-insensitive)
+    entity = conn.execute("SELECT id, name FROM entities WHERE name = ? COLLATE NOCASE", (args.entity,)).fetchone()
     if not entity:
         entities = conn.execute("SELECT name FROM entities ORDER BY name").fetchall()
         if args.json:
@@ -42,9 +42,9 @@ def cmd_add(args):
             print(f"\nCreate it first with: ./scripts/entity add --name '{args.entity}'")
         sys.exit(1)
 
-    # Check for duplicate category name for this entity
+    # Check for duplicate category name for this entity (case-insensitive)
     existing = conn.execute(
-        "SELECT id FROM categories WHERE entity_id = ? AND name = ?",
+        "SELECT id FROM categories WHERE entity_id = ? AND name = ? COLLATE NOCASE",
         (entity['id'], args.name)
     ).fetchone()
     if existing:
@@ -87,8 +87,8 @@ def cmd_update(args):
     """Update a category."""
     conn = get_db()
 
-    # Find entity
-    entity = conn.execute("SELECT id, name FROM entities WHERE name = ?", (args.entity,)).fetchone()
+    # Find entity (case-insensitive)
+    entity = conn.execute("SELECT id, name FROM entities WHERE name = ? COLLATE NOCASE", (args.entity,)).fetchone()
     if not entity:
         if args.json:
             print(json.dumps({"error": f"Entity '{args.entity}' not found"}))
@@ -97,7 +97,7 @@ def cmd_update(args):
         sys.exit(1)
 
     category = conn.execute(
-        "SELECT id, name, type FROM categories WHERE entity_id = ? AND name = ?",
+        "SELECT id, name, type FROM categories WHERE entity_id = ? AND name = ? COLLATE NOCASE",
         (entity['id'], args.name)
     ).fetchone()
     if not category:
@@ -123,8 +123,8 @@ def cmd_delete(args):
     """Delete a category."""
     conn = get_db()
 
-    # Find entity
-    entity = conn.execute("SELECT id, name FROM entities WHERE name = ?", (args.entity,)).fetchone()
+    # Find entity (case-insensitive)
+    entity = conn.execute("SELECT id, name FROM entities WHERE name = ? COLLATE NOCASE", (args.entity,)).fetchone()
     if not entity:
         if args.json:
             print(json.dumps({"error": f"Entity '{args.entity}' not found"}))
@@ -150,9 +150,9 @@ def cmd_delete(args):
 
     if tx_count > 0:
         if args.reassign:
-            # Find the reassignment category
+            # Find the reassignment category (case-insensitive)
             new_cat = conn.execute(
-                "SELECT id, name FROM categories WHERE entity_id = ? AND name = ?",
+                "SELECT id, name FROM categories WHERE entity_id = ? AND name = ? COLLATE NOCASE",
                 (entity['id'], args.reassign)
             ).fetchone()
             if not new_cat:
@@ -211,7 +211,7 @@ def cmd_list(args):
     params = []
     entity_filter = ""
     if args.entity:
-        entity_filter = "WHERE e.name = ? OR c.entity_id IS NULL"
+        entity_filter = "WHERE e.name = ? COLLATE NOCASE OR c.entity_id IS NULL"
         params.append(args.entity)
 
     rows = conn.execute(f"""

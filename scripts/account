@@ -23,8 +23,8 @@ def cmd_add(args):
     """Add a new account."""
     conn = get_db()
 
-    # Find entity
-    entity = conn.execute("SELECT id, name FROM entities WHERE name = ?", (args.entity,)).fetchone()
+    # Find entity (case-insensitive)
+    entity = conn.execute("SELECT id, name FROM entities WHERE name = ? COLLATE NOCASE", (args.entity,)).fetchone()
     if not entity:
         entities = conn.execute("SELECT name FROM entities ORDER BY name").fetchall()
         if args.json:
@@ -42,8 +42,8 @@ def cmd_add(args):
             print(f"\nCreate it first with: ./scripts/entity add --name '{args.entity}'")
         sys.exit(1)
 
-    # Check for duplicate account name
-    existing = conn.execute("SELECT id FROM accounts WHERE name = ?", (args.name,)).fetchone()
+    # Check for duplicate account name (case-insensitive)
+    existing = conn.execute("SELECT id FROM accounts WHERE name = ? COLLATE NOCASE", (args.name,)).fetchone()
     if existing:
         if args.json:
             print(json.dumps({"error": f"Account '{args.name}' already exists"}))
@@ -95,8 +95,8 @@ def cmd_update(args):
     """Update an account."""
     conn = get_db()
 
-    # Find entity
-    entity = conn.execute("SELECT id, name FROM entities WHERE name = ?", (args.entity,)).fetchone()
+    # Find entity (case-insensitive)
+    entity = conn.execute("SELECT id, name FROM entities WHERE name = ? COLLATE NOCASE", (args.entity,)).fetchone()
     if not entity:
         entities = conn.execute("SELECT name FROM entities ORDER BY name").fetchall()
         if args.json:
@@ -113,7 +113,7 @@ def cmd_update(args):
         sys.exit(1)
 
     account = conn.execute(
-        "SELECT id, name FROM accounts WHERE name = ? AND entity_id = ?", (args.name, entity['id'])
+        "SELECT id, name FROM accounts WHERE name = ? COLLATE NOCASE AND entity_id = ?", (args.name, entity['id'])
     ).fetchone()
     if not account:
         if args.json:
@@ -150,8 +150,8 @@ def cmd_delete(args):
     """Delete an account."""
     conn = get_db()
 
-    # Find entity
-    entity = conn.execute("SELECT id, name FROM entities WHERE name = ?", (args.entity,)).fetchone()
+    # Find entity (case-insensitive)
+    entity = conn.execute("SELECT id, name FROM entities WHERE name = ? COLLATE NOCASE", (args.entity,)).fetchone()
     if not entity:
         entities = conn.execute("SELECT name FROM entities ORDER BY name").fetchall()
         if args.json:
@@ -168,7 +168,7 @@ def cmd_delete(args):
         sys.exit(1)
 
     account = conn.execute(
-        "SELECT id, name FROM accounts WHERE name = ? AND entity_id = ?", (args.name, entity['id'])
+        "SELECT id, name FROM accounts WHERE name = ? COLLATE NOCASE AND entity_id = ?", (args.name, entity['id'])
     ).fetchone()
     if not account:
         if args.json:
@@ -217,7 +217,7 @@ def cmd_list(args):
     params = []
     entity_filter = ""
     if args.entity:
-        entity_filter = "WHERE e.name = ?"
+        entity_filter = "WHERE e.name = ? COLLATE NOCASE"
         params.append(args.entity)
 
     rows = conn.execute(f"""
